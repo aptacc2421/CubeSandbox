@@ -1,10 +1,10 @@
-# CubeSandbox Webhook 事件通知
+# CubeSandbox Webhook Event Notifications
 
-CubeAPI 支持在沙箱生命周期事件发生时向用户配置的 HTTP 端点发送 Webhook 回调。可用于实时监控、自动化流程、审计追踪等场景。
+CubeAPI can send webhook callbacks to user-configured HTTP endpoints when sandbox lifecycle events occur. Use cases include real-time monitoring, automated workflows, and audit trails.
 
-## 快速开始
+## Quick Start
 
-### 1. 配置环境变量
+### 1. Configure Environment Variables
 
 ```bash
 export CUBE_WEBHOOK_URLS="https://your-server.com/webhook"
@@ -12,7 +12,7 @@ export CUBE_WEBHOOK_EVENTS="sandbox.created,sandbox.deleted,sandbox.paused,sandb
 export CUBE_WEBHOOK_SECRET="your-hmac-secret-key"
 ```
 
-### 2. 启动 CubeAPI
+### 2. Start CubeAPI
 
 ```bash
 cube-api --webhook-urls "https://your-server.com/webhook" \
@@ -20,35 +20,33 @@ cube-api --webhook-urls "https://your-server.com/webhook" \
          --webhook-secret "your-hmac-secret-key"
 ```
 
-CLI 参数优先级高于环境变量。Webhook URL 支持逗号分隔配置多个端点。
+CLI flags take priority over environment variables. Multiple endpoints can be
+specified as a comma-separated list in `CUBE_WEBHOOK_URLS`.
 
-### 3. 验证
+### 3. Verification
 
-分两层验证。第一层不需要 CubeMaster 环境，5 分钟可跑通。
+Two levels of verification. Level 1 requires no CubeMaster — approximately 5 minutes.
 
-#### 3. 验证
+#### 3.1 Quick Verification (no CubeMaster required, ~5 minutes)
 
-分两层。第一层无需 CubeMaster，约 5 分钟可完成。
-
-#### 3.1 核心验证（不需要 CubeMaster，约 5 分钟）
-
-**Step 1: Webhook 投递逻辑** (mock HTTP server 验证，约 10 秒)：
+**Step 1: Webhook delivery logic** (mock HTTP server, ~10 seconds):
 
 ```bash
 cd CubeAPI
 cargo test -- logging::http
 ```
 
-10 个测试覆盖：payload 构建、HMAC 签名、HTTP 投递、事件过滤、重试、shutdown。
+10 tests covering: payload construction, HMAC signing, HTTP delivery, event
+filtering, retry behavior, and shutdown coordination.
 
-**Step 2: 接收端独立验证** (约 1 分钟)：
+**Step 2: Standalone receiver verification** (~1 minute):
 
 ```bash
-# 终端 1: 启动接收端
+# Terminal 1: Start the receiver
 cd examples/webhook-receiver
 WEBHOOK_SECRET=test-secret cargo run
 
-# 终端 2: 用 curl 模拟 CubeAPI 发送 webhook
+# Terminal 2: Simulate CubeAPI sending a webhook via curl
 BODY='{"event":"sandbox.created","timestamp":"2026-07-20T12:00:00Z","sandbox_id":"sb-abc"}'
 SIG="sha256=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "test-secret" | cut -d' ' -f2)"
 curl -X POST http://127.0.0.1:9090/webhook \
@@ -56,10 +54,10 @@ curl -X POST http://127.0.0.1:9090/webhook \
   -H "X-Cube-Event: sandbox.created" \
   -H "X-Cube-Signature: $SIG" \
   -d "$BODY"
-# 终端 1 应打印接收到的 webhook 内容，签名验证通过
+# Terminal 1 should print the received webhook content
 ```
 
-**Step 3: 代码规范检查** (约 30 秒)：
+**Step 3: Code style check** (~30 seconds):
 
 ```bash
 cd CubeAPI
@@ -67,60 +65,61 @@ cargo fmt --check
 cargo clippy -- -D warnings
 ```
 
-#### 3.2 完整 E2E（需要 CubeSandbox 集群）
+#### 3.2 Full E2E (requires CubeSandbox cluster)
 
-完整验证需要 CubeMaster 运行中（CubeAPI 通过它创建沙箱）。搭建方式参考:
+Full verification requires a running CubeMaster. For cluster setup, see:
 
-- [快速开始](../../docs/zh/guide/quickstart.md) — 裸金属/KVM 环境
-- [开发环境](../../docs/zh/guide/dev-environment.md) — QEMU 虚拟机
+- [Quick Start](../zh/guide/quickstart.md) — bare-metal / KVM environment
+- [Dev Environment](../zh/guide/dev-environment.md) — QEMU virtual machine
 
-集群启动后：
+Once the cluster is running:
 
 ```bash
-# 终端 1: 接收端
+# Terminal 1: Receiver
 cd examples/webhook-receiver && WEBHOOK_SECRET=test-secret cargo run
 
-# 终端 2: CubeAPI
+# Terminal 2: CubeAPI
 cd CubeAPI
 CUBE_WEBHOOK_URLS=http://127.0.0.1:9090/webhook \
 CUBE_WEBHOOK_SECRET=test-secret \
 cargo run
 
-# 终端 3: 创建沙箱
+# Terminal 3: Create a sandbox
 curl -X POST http://localhost:3000/sandboxes \
   -H "Content-Type: application/json" \
   -d '{"templateID": "your-template-id"}'
 ```
 
-## 配置参考
+## Configuration Reference
 
-| 环境变量              | CLI 参数           | 默认值           | 说明                        |
-| --------------------- | ------------------ | ---------------- | --------------------------- |
-| `CUBE_WEBHOOK_URLS`   | `--webhook-urls`   | `""` (禁用)      | 逗号分隔的 Webhook 端点 URL |
-| `CUBE_WEBHOOK_EVENTS` | `--webhook-events` | 4 个生命周期事件 | 逗号分隔的订阅事件类型      |
-| `CUBE_WEBHOOK_SECRET` | `--webhook-secret` | `""` (不签名)    | HMAC-SHA256 共享密钥        |
+| Env Variable | CLI Flag | Default | Description |
+|-------------|----------|---------|-------------|
+| `CUBE_WEBHOOK_URLS` | `--webhook-urls` | `""` (disabled) | Comma-separated webhook endpoint URLs |
+| `CUBE_WEBHOOK_EVENTS` | `--webhook-events` | 4 lifecycle events | Comma-separated event types to subscribe to |
+| `CUBE_WEBHOOK_SECRET` | `--webhook-secret` | `""` (no signing) | Shared HMAC-SHA256 secret key |
 
-`CUBE_WEBHOOK_URLS` 为空时，Webhook 功能完全禁用，无任何性能开销。
+When `CUBE_WEBHOOK_URLS` is empty, webhook delivery is completely disabled
+with zero performance overhead.
 
-## 支持的事件
+## Supported Events
 
-| 事件名            | 触发时机     | 携带字段                    |
-| ----------------- | ------------ | --------------------------- |
-| `sandbox.created` | 沙箱创建成功 | `sandbox_id`, `template_id` |
-| `sandbox.deleted` | 沙箱删除成功 | `sandbox_id`                |
-| `sandbox.paused`  | 沙箱暂停成功 | `sandbox_id`                |
-| `sandbox.resumed` | 沙箱恢复成功 | `sandbox_id`                |
+| Event | Trigger | Fields |
+|-------|---------|--------|
+| `sandbox.created` | Sandbox created | `sandbox_id`, `template_id` |
+| `sandbox.deleted` | Sandbox deleted | `sandbox_id` |
+| `sandbox.paused` | Sandbox paused | `sandbox_id` |
+| `sandbox.resumed` | Sandbox resumed | `sandbox_id` |
 
-## Payload 格式
+## Payload Format
 
-### HTTP 请求
+### HTTP Request
 
 ```
 POST <webhook-url>
 Content-Type: application/json
 X-Cube-Event: sandbox.created
 X-Cube-Delivery: 550e8400-e29b-41d4-a716-446655440000
-X-Cube-Signature: sha256=d5e9f... (仅当配置了 CUBE_WEBHOOK_SECRET)
+X-Cube-Signature: sha256=d5e9f... (only when CUBE_WEBHOOK_SECRET is set)
 User-Agent: CubeAPI-Webhook/1.0
 ```
 
@@ -135,27 +134,30 @@ User-Agent: CubeAPI-Webhook/1.0
 }
 ```
 
-字段说明：
-- `event`: 事件名称
-- `timestamp`: 事件发生时间 (RFC 3339)
-- `sandbox_id`: 沙箱唯一标识
-- `template_id`: 模板标识 (仅在 created 事件中保证存在)
+Fields:
+- `event`: Event name
+- `timestamp`: Event time (RFC 3339)
+- `sandbox_id`: Unique sandbox identifier
+- `template_id`: Template identifier (guaranteed only in `created` events)
 
-## 安全
+## Security
 
-### HMAC-SHA256 签名验证
+### HMAC-SHA256 Signature Verification
 
-CubeAPI 对 HTTP Body 的原始字节计算 HMAC-SHA256 签名，通过 `X-Cube-Signature` Header 传递。
+CubeAPI signs the raw HTTP body bytes using HMAC-SHA256 and passes the
+signature via the `X-Cube-Signature` header.
 
-签名格式: `sha256=<lowercase hex>`
+Signature format: `sha256=<lowercase hex>`
 
-**验证步骤:**
+**Verification steps:**
 
-1. 获取 HTTP Body 的原始字节 (注意: 不要先解析 JSON 再重新序列化 — JSON 序列化不是确定性的)
-2. 使用共享密钥计算 `HMAC-SHA256(secret, raw_body_bytes)`
-3. 与 `X-Cube-Signature` Header 的值比对 (安全比较，防时序攻击)
+1. Obtain the raw HTTP body bytes (do NOT deserialize and re-serialize JSON —
+   JSON serialization is not deterministic)
+2. Compute `HMAC-SHA256(secret, raw_body_bytes)`
+3. Compare with the `X-Cube-Signature` header value (constant-time comparison
+   recommended for production)
 
-**Rust 验证示例:**
+**Rust verification example:**
 
 ```rust
 use hmac::{Hmac, Mac};
@@ -168,12 +170,12 @@ fn verify_signature(secret: &str, body: &[u8], signature: &str) -> bool {
         .expect("HMAC can take key of any size");
     mac.update(body);
     let expected = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
-    // 生产环境应使用 constant-time comparison
+    // Use constant-time comparison in production
     expected == signature
 }
 ```
 
-**Python 验证示例:**
+**Python verification example:**
 
 ```python
 import hmac
@@ -186,33 +188,36 @@ def verify_signature(secret: str, body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 ```
 
-### 幂等性
+### Idempotency
 
-每次投递生成唯一的 `X-Cube-Delivery` UUID。接收端可以使用此 ID 进行去重，防止重复处理同一事件。
+Each delivery generates a unique `X-Cube-Delivery` UUID. Receivers can use
+this ID for deduplication to prevent processing the same event more than once.
 
-## 重试策略
+## Retry Strategy
 
-| 条件 | 行为 |
-|------|------|
-| HTTP 2xx | 成功 |
-| HTTP 4xx | 不重试 (客户端错误无法修复) |
-| HTTP 5xx / 连接错误 | 指数退避重试，最多 3 次 |
+| Condition | Behavior |
+|-----------|----------|
+| HTTP 2xx | Success |
+| HTTP 4xx | No retry (client error is not recoverable) |
+| HTTP 5xx / connection error | Exponential backoff retry, up to 3 times |
 
-退避间隔: 1s → 2s → 4s。总最多 4 次 HTTP 请求 (initial + 3 retries)。
+Backoff: 1s → 2s → 4s. Maximum 4 HTTP attempts (1 initial + 3 retries).
 
-## 对接企业微信机器人
+## WeCom Bot Integration
 
-CubeAPI Webhook 的 Payload 格式与企业微信机器人要求的 `msgtype` 格式不同，不能直接将企微 URL 配置为 CubeAPI 的 Webhook 端点。需要通过接收器示例做适配转发：
+The CubeAPI Webhook payload format differs from the WeCom bot message format
+(`msgtype`). Use the example receiver as an adapter:
 
 ```
-CubeAPI → examples/webhook-receiver → 企业微信群机器人
+CubeAPI → examples/webhook-receiver → WeCom bot
 ```
 
-**步骤:**
+**Steps:**
 
-1. 在企业微信群中添加机器人，获取 Webhook URL（格式: `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx`）
+1. Add a bot in your WeCom group and get the webhook URL
+   (format: `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx`)
 
-2. 启动接收器并设置企微转发:
+2. Start the receiver with WeCom forwarding:
 ```bash
 cd examples/webhook-receiver
 WEBHOOK_SECRET=test-secret \
@@ -220,7 +225,7 @@ WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx \
 cargo run
 ```
 
-3. 配置 CubeAPI 指向接收器:
+3. Configure CubeAPI to point to the receiver:
 ```bash
 cd CubeAPI
 CUBE_WEBHOOK_URLS=http://127.0.0.1:9090/webhook \
@@ -228,19 +233,20 @@ CUBE_WEBHOOK_SECRET=test-secret \
 cargo run
 ```
 
-沙箱事件将自动以文本消息推送到企业微信群。
+Sandbox events will be delivered as text messages to the WeCom group.
 
-### 通用 HTTP 告警
+### Generic HTTP Alerts
 
-任何支持 HTTP POST 的告警平台都可以直接对接 CubeAPI Webhook。Payload 为标准 JSON，无需特殊 SDK。
+Any alerting platform that accepts HTTP POST can integrate directly with
+CubeAPI Webhooks. The payload is standard JSON — no special SDK required.
 
-## 故障排查
+## Troubleshooting
 
-| 症状 | 可能原因 | 检查项 |
-|------|---------|--------|
-| Webhook 未收到事件 | URL 配置为空 | 检查 `CUBE_WEBHOOK_URLS` 或 `--webhook-urls` |
-| 签名验证失败 | 密钥不匹配 | 确认发送端和接收端使用相同的 `CUBE_WEBHOOK_SECRET` |
-| 签名验证失败 | Body 被修改 | 确保验证时使用的是原始 HTTP Body 字节 |
-| 接收端收到重复事件 | 正常重试 | 使用 `X-Cube-Delivery` UUID 去重 |
-| 事件未触发 | 事件名拼写错误 | 检查 `CUBE_WEBHOOK_EVENTS` 中的事件名是否正确 |
-| HTTPS 证书错误 | 自签名证书 | 使用 HTTP + 内网环境测试，或配置 CA 证书 |
+| Symptom | Possible Cause | Check |
+|---------|---------------|-------|
+| No webhook received | Empty URL config | Verify `CUBE_WEBHOOK_URLS` or `--webhook-urls` |
+| Signature verification fails | Key mismatch | Ensure sender and receiver use the same `CUBE_WEBHOOK_SECRET` |
+| Signature verification fails | Body modified | Verify against raw HTTP body bytes, not re-serialized JSON |
+| Duplicate events received | Normal retry | Deduplicate using `X-Cube-Delivery` UUID |
+| Event not triggered | Event name typo | Check `CUBE_WEBHOOK_EVENTS` for correct event names |
+| HTTPS certificate error | Self-signed cert | Use HTTP for internal testing, or configure CA certificates |
