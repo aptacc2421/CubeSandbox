@@ -65,12 +65,22 @@ CLI 参数优先级高于环境变量。Webhook URL 支持逗号分隔配置多�
 
 ### 完整 E2E 测试
 
-CubeAPI 运行且 CubeMaster 可达时，创建沙箱触发事件：
-
 ```bash
+# 终端 1: 启动接收端
+cd examples/webhook-receiver
+WEBHOOK_SECRET=test-secret cargo run
+
+# 终端 2: 启动 CubeAPI（配置 webhook）
+cd CubeAPI
+CUBE_WEBHOOK_URLS=http://127.0.0.1:9090/webhook \
+CUBE_WEBHOOK_SECRET=test-secret \
+cargo run
+
+# 终端 3: 创建沙箱触发 sandbox.created 事件
 curl -X POST http://localhost:3000/sandboxes \
   -H "Content-Type: application/json" \
   -d '{"templateID": "your-template-id"}'
+# 终端 1 应收到 webhook 回调
 ```
 
 ## 配置参考

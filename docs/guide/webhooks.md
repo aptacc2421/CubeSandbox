@@ -72,13 +72,22 @@ specified as a comma-separated list in `CUBE_WEBHOOK_URLS`.
 
 ### Full E2E test
 
-With CubeAPI running and CubeMaster reachable, create a sandbox to trigger
-the `sandbox.created` event:
-
 ```bash
+# Terminal 1: start the receiver
+cd examples/webhook-receiver
+WEBHOOK_SECRET=test-secret cargo run
+
+# Terminal 2: start CubeAPI with webhook config
+cd CubeAPI
+CUBE_WEBHOOK_URLS=http://127.0.0.1:9090/webhook \
+CUBE_WEBHOOK_SECRET=test-secret \
+cargo run
+
+# Terminal 3: create a sandbox to trigger sandbox.created
 curl -X POST http://localhost:3000/sandboxes \
   -H "Content-Type: application/json" \
   -d '{"templateID": "your-template-id"}'
+# Terminal 1 should print the received webhook
 ```
 
 ## Configuration Reference
