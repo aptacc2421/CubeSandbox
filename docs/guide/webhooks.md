@@ -129,7 +129,9 @@ Fields:
 - `event`: Event name
 - `timestamp`: Event time (RFC 3339)
 - `sandbox_id`: Unique sandbox identifier
-- `template_id`: Template identifier (guaranteed only in `created` events)
+- `template_id`: Template identifier (always present in `created` events;
+  also available from the service layer for `resumed` but not yet
+  emitted by the handler — tracked for a future improvement)
 
 ## Security
 

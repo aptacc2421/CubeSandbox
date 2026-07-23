@@ -120,7 +120,7 @@ User-Agent: CubeAPI-Webhook/1.0
 - `event`: 事件名称
 - `timestamp`: 事件发生时间 (RFC 3339)
 - `sandbox_id`: 沙箱唯一标识
-- `template_id`: 模板标识 (仅在 created 事件中保证存在)
+- `template_id`: 模板标识 (`created` 事件始终携带; `resumed` 事件的 Service 层已有此数据，handler 尚未发射 — 后续优化)
 
 ## 安全
 
