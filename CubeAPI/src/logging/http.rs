@@ -129,9 +129,8 @@ impl HttpLogger {
                         }
 
                         let payload = build_payload(&event);
-                        let body_bytes = bytes::Bytes::from(
-                            serde_json::to_string(&payload).unwrap_or_default(),
-                        );
+                        let body_bytes =
+                            bytes::Bytes::from(serde_json::to_string(&payload).unwrap_or_default());
                         let event_name = event.event.clone();
 
                         pending_bg.fetch_add(1, Ordering::Relaxed);
@@ -205,9 +204,7 @@ impl Logger for HttpLogger {
     async fn log(&self, event: LogEvent) {
         // ── Pre-send filter ──────────────────────────────────────────────
         // Filter BEFORE enqueue — avoids wasting channel capacity.
-        if !self.subscribed_events.is_empty()
-            && !self.subscribed_events.contains(&event.event)
-        {
+        if !self.subscribed_events.is_empty() && !self.subscribed_events.contains(&event.event) {
             return;
         }
 
@@ -250,8 +247,8 @@ fn sign_payload(secret: &str, body: &[u8]) -> String {
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC can take key of any size");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(body);
     let result = mac.finalize();
     format!("sha256={}", hex::encode(result.into_bytes()))
@@ -347,8 +344,8 @@ async fn deliver_with_retry(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{LogEvent, LogLevel};
+    use super::*;
     use axum::{routing::post, Router};
     use std::sync::Mutex;
 
@@ -375,8 +372,14 @@ mod tests {
 
     #[test]
     fn redact_url_strips_path_and_query() {
-        assert_eq!(redact_url("https://hooks.example.com/webhook"), "hooks.example.com");
-        assert_eq!(redact_url("http://127.0.0.1:9090/callback?token=abc"), "127.0.0.1:9090");
+        assert_eq!(
+            redact_url("https://hooks.example.com/webhook"),
+            "hooks.example.com"
+        );
+        assert_eq!(
+            redact_url("http://127.0.0.1:9090/callback?token=abc"),
+            "127.0.0.1:9090"
+        );
         assert_eq!(redact_url("https://example.com"), "example.com");
     }
 
@@ -390,7 +393,9 @@ mod tests {
             http_client: reqwest::Client::new(),
         };
         let logger = HttpLogger::new(config);
-        logger.log(LogEvent::new(LogLevel::Info, "sandbox.created")).await;
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created"))
+            .await;
         logger.flush().await;
     }
 
@@ -403,7 +408,9 @@ mod tests {
         let app = Router::new().route(
             "/webhook",
             post(move |body: axum::body::Bytes| async move {
-                b.lock().unwrap().push(String::from_utf8_lossy(&body).to_string());
+                b.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&body).to_string());
                 "ok"
             }),
         );
@@ -447,8 +454,12 @@ mod tests {
             http_client: reqwest::Client::new(),
         };
         let logger = HttpLogger::new(config);
-        logger.log(LogEvent::new(LogLevel::Info, "sandbox.created")).await;
-        logger.log(LogEvent::new(LogLevel::Info, "sandbox.deleted")).await;
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created"))
+            .await;
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.deleted"))
+            .await;
         logger.flush().await;
         assert_eq!(bodies.lock().unwrap().len(), 1);
     }
@@ -465,8 +476,11 @@ mod tests {
             "/webhook",
             post(move |_: axum::body::Bytes| async move {
                 let n = c.fetch_add(1, Ordering::SeqCst);
-                if n <= 1 { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "err") }
-                else { (axum::http::StatusCode::OK, "ok") }
+                if n <= 1 {
+                    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "err")
+                } else {
+                    (axum::http::StatusCode::OK, "ok")
+                }
             }),
         );
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -479,10 +493,15 @@ mod tests {
             http_client: reqwest::Client::new(),
         };
         let logger = HttpLogger::new(config);
-        logger.log(LogEvent::new(LogLevel::Info, "sandbox.created")).await;
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created"))
+            .await;
         logger.flush().await;
-        assert!(counter.load(Ordering::SeqCst) >= 2,
-            "expected at least 2 attempts, got {}", counter.load(Ordering::SeqCst));
+        assert!(
+            counter.load(Ordering::SeqCst) >= 2,
+            "expected at least 2 attempts, got {}",
+            counter.load(Ordering::SeqCst)
+        );
     }
 
     #[tokio::test]
@@ -510,7 +529,9 @@ mod tests {
             http_client: reqwest::Client::new(),
         };
         let logger = HttpLogger::new(config);
-        logger.log(LogEvent::new(LogLevel::Info, "sandbox.created")).await;
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created"))
+            .await;
         logger.flush().await;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -524,12 +545,14 @@ mod tests {
         let url = format!("http://{}:{}/webhook", addr.ip(), addr.port());
         let app = Router::new().route(
             "/webhook",
-            post(move |headers: axum::http::HeaderMap, _body: axum::body::Bytes| async move {
-                if let Some(val) = headers.get("X-Cube-Signature") {
-                    *s.lock().unwrap() = Some(val.to_str().unwrap().to_string());
-                }
-                axum::http::StatusCode::OK
-            }),
+            post(
+                move |headers: axum::http::HeaderMap, _body: axum::body::Bytes| async move {
+                    if let Some(val) = headers.get("X-Cube-Signature") {
+                        *s.lock().unwrap() = Some(val.to_str().unwrap().to_string());
+                    }
+                    axum::http::StatusCode::OK
+                },
+            ),
         );
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -541,7 +564,9 @@ mod tests {
             http_client: reqwest::Client::new(),
         };
         let logger = HttpLogger::new(config);
-        logger.log(LogEvent::new(LogLevel::Info, "sandbox.created")).await;
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created"))
+            .await;
         logger.flush().await;
         let captured = sig.lock().unwrap();
         assert!(captured.is_some(), "X-Cube-Signature header missing");
@@ -570,7 +595,9 @@ mod tests {
             http_client: reqwest::Client::new(),
         };
         let logger = HttpLogger::new(config);
-        logger.log(LogEvent::new(LogLevel::Info, "sandbox.created")).await;
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created"))
+            .await;
         let start = std::time::Instant::now();
         logger.flush().await;
         assert!(start.elapsed() >= std::time::Duration::from_millis(100));

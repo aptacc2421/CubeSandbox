@@ -240,8 +240,8 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
 
     // ── Conditional: Webhook (HttpLogger) ───────────────────────────────
     if !cfg.webhook_urls.trim().is_empty() {
-        use std::collections::HashSet;
         use logging::http::{HttpLogger, HttpLoggerConfig};
+        use std::collections::HashSet;
 
         let targets: Vec<String> = cfg
             .webhook_urls
@@ -265,10 +265,7 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
                     || host == "::1"
                     || host.starts_with("[::1]");
                 if !url.starts_with("https://") && !is_loopback {
-                    tracing::warn!(
-                        "webhook URL uses HTTP (not HTTPS): {host}",
-                        host = host
-                    );
+                    tracing::warn!("webhook URL uses HTTP (not HTTPS): {host}", host = host);
                 }
             }
 
