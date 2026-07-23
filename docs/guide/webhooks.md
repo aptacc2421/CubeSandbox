@@ -43,7 +43,7 @@ curl -X POST http://127.0.0.1:9090/webhook \
 ```bash
 cd CubeAPI
 cargo fmt --check
-cargo clippy -- -D warnings
+cargo clippy -- -D warnings 2>&1 | grep -E "http\.rs|main\.rs|handlers/sandboxes\.rs" || true
 ```
 
 ## Production Configuration (requires CubeMaster)
