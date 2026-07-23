@@ -33,13 +33,16 @@ CLI 参数优先级高于环境变量。Webhook URL 支持逗号分隔配置多�
 #### 3.1 核心验证（不需要 CubeMaster，约 5 分钟）
 
 **Step 1: Webhook 投递逻辑** (mock HTTP server 验证，约 10 秒)：
+
 ```bash
 cd CubeAPI
 cargo test -- logging::http
 ```
+
 10 个测试覆盖：payload 构建、HMAC 签名、HTTP 投递、事件过滤、重试、shutdown。
 
 **Step 2: 接收端独立验证** (约 1 分钟)：
+
 ```bash
 # 终端 1: 启动接收端
 cd examples/webhook-receiver
@@ -57,6 +60,7 @@ curl -X POST http://127.0.0.1:9090/webhook \
 ```
 
 **Step 3: 代码规范检查** (约 30 秒)：
+
 ```bash
 cd CubeAPI
 cargo fmt --check
@@ -66,10 +70,12 @@ cargo clippy -- -D warnings
 #### 3.2 完整 E2E（需要 CubeSandbox 集群）
 
 完整验证需要 CubeMaster 运行中（CubeAPI 通过它创建沙箱）。搭建方式参考:
+
 - [快速开始](../../docs/zh/guide/quickstart.md) — 裸金属/KVM 环境
 - [开发环境](../../docs/zh/guide/dev-environment.md) — QEMU 虚拟机
 
 集群启动后：
+
 ```bash
 # 终端 1: 接收端
 cd examples/webhook-receiver && WEBHOOK_SECRET=test-secret cargo run
@@ -88,22 +94,22 @@ curl -X POST http://localhost:3000/sandboxes \
 
 ## 配置参考
 
-| 环境变量 | CLI 参数 | 默认值 | 说明 |
-|---------|----------|--------|------|
-| `CUBE_WEBHOOK_URLS` | `--webhook-urls` | `""` (禁用) | 逗号分隔的 Webhook 端点 URL |
-| `CUBE_WEBHOOK_EVENTS` | `--webhook-events` | 4 个生命周期事件 | 逗号分隔的订阅事件类型 |
-| `CUBE_WEBHOOK_SECRET` | `--webhook-secret` | `""` (不签名) | HMAC-SHA256 共享密钥 |
+| 环境变量              | CLI 参数           | 默认值           | 说明                        |
+| --------------------- | ------------------ | ---------------- | --------------------------- |
+| `CUBE_WEBHOOK_URLS`   | `--webhook-urls`   | `""` (禁用)      | 逗号分隔的 Webhook 端点 URL |
+| `CUBE_WEBHOOK_EVENTS` | `--webhook-events` | 4 个生命周期事件 | 逗号分隔的订阅事件类型      |
+| `CUBE_WEBHOOK_SECRET` | `--webhook-secret` | `""` (不签名)    | HMAC-SHA256 共享密钥        |
 
 `CUBE_WEBHOOK_URLS` 为空时，Webhook 功能完全禁用，无任何性能开销。
 
 ## 支持的事件
 
-| 事件名 | 触发时机 | 携带字段 |
-|--------|---------|---------|
+| 事件名            | 触发时机     | 携带字段                    |
+| ----------------- | ------------ | --------------------------- |
 | `sandbox.created` | 沙箱创建成功 | `sandbox_id`, `template_id` |
-| `sandbox.deleted` | 沙箱删除成功 | `sandbox_id` |
-| `sandbox.paused` | 沙箱暂停成功 | `sandbox_id` |
-| `sandbox.resumed` | 沙箱恢复成功 | `sandbox_id` |
+| `sandbox.deleted` | 沙箱删除成功 | `sandbox_id`                |
+| `sandbox.paused`  | 沙箱暂停成功 | `sandbox_id`                |
+| `sandbox.resumed` | 沙箱恢复成功 | `sandbox_id`                |
 
 ## Payload 格式
 
@@ -196,42 +202,35 @@ def verify_signature(secret: str, body: bytes, signature: str) -> bool:
 
 ## 对接企业微信机器人
 
-### 方案 1: 中间转发服务
+CubeAPI Webhook 的 Payload 格式与企业微信机器人要求的 `msgtype` 格式不同，不能直接将企微 URL 配置为 CubeAPI 的 Webhook 端点。需要通过接收器示例做适配转发：
 
-CubeAPI Webhook → 自建转发服务 → 企业微信机器人 Webhook
-
-转发服务将 CubeAPI JSON 格式转换为企业微信 Markdown 消息：
-
-```python
-# webhook-bridge.py
-from flask import Flask, request
-import requests
-import json
-
-app = Flask(__name__)
-WECOM_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
-
-@app.route("/webhook", methods=["POST"])
-def bridge():
-    data = request.get_json()
-    event = data["event"]
-    sandbox_id = data["sandbox_id"]
-    template_id = data.get("template_id", "N/A")
-
-    markdown = f"""## CubeSandbox Event
-> 事件: **{event}**
-> 沙箱: `{sandbox_id}`
-> 模板: `{template_id}`
-> 时间: {data['timestamp']}"""
-
-    requests.post(WECOM_URL, json={
-        "msgtype": "markdown",
-        "markdown": {"content": markdown}
-    })
-    return "ok"
+```
+CubeAPI → examples/webhook-receiver → 企业微信群机器人
 ```
 
-### 方案 2: 通用 HTTP 告警
+**步骤:**
+
+1. 在企业微信群中添加机器人，获取 Webhook URL（格式: `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx`）
+
+2. 启动接收器并设置企微转发:
+```bash
+cd examples/webhook-receiver
+WEBHOOK_SECRET=test-secret \
+WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx \
+cargo run
+```
+
+3. 配置 CubeAPI 指向接收器:
+```bash
+cd CubeAPI
+CUBE_WEBHOOK_URLS=http://127.0.0.1:9090/webhook \
+CUBE_WEBHOOK_SECRET=test-secret \
+cargo run
+```
+
+沙箱事件将自动以文本消息推送到企业微信群。
+
+### 通用 HTTP 告警
 
 任何支持 HTTP POST 的告警平台都可以直接对接 CubeAPI Webhook。Payload 为标准 JSON，无需特殊 SDK。
 

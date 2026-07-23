@@ -80,7 +80,32 @@ async fn handle_webhook(
     }
     println!("========================\n");
 
+    forward_to_wecom(&body_str).await;
+
     (axum::http::StatusCode::OK, "ok".to_string())
+}
+
+/// Forward to WeCom bot if WECOM_WEBHOOK_URL is set.
+async fn forward_to_wecom(body_str: &str) {
+    let wecom_url = match std::env::var("WECOM_WEBHOOK_URL") {
+        Ok(url) if !url.is_empty() => url,
+        _ => return,
+    };
+    let parsed = match serde_json::from_str::<serde_json::Value>(body_str) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let content = format!(
+        "【CubeSandbox】{}\nSandbox: {}\nTime: {}",
+        parsed["event"].as_str().unwrap_or("unknown"),
+        parsed["sandbox_id"].as_str().unwrap_or("?"),
+        parsed["timestamp"].as_str().unwrap_or("?")
+    );
+    let _ = reqwest::Client::new()
+        .post(&wecom_url)
+        .json(&serde_json::json!({"msgtype": "text", "text": {"content": content}}))
+        .send()
+        .await;
 }
 
 fn sign_payload(secret: &str, body: &[u8]) -> String {

@@ -48,6 +48,15 @@ curl -X POST http://127.0.0.1:9090/webhook \
 
 参考 `docs/guide/webhooks.md` 中的"本地验证"部分。
 
+## 环境变量
+
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `WEBHOOK_SECRET` | HMAC-SHA256 共享密钥 (空=不验证) | `""` |
+| `WECOM_WEBHOOK_URL` | 企业微信群机器人 Webhook URL (空=不转发) | `""` |
+| `PORT` | 监听端口 | `9090` |
+| `LISTEN` | 监听地址 | `127.0.0.1` |
+
 ## 与 CubeAPI 集成
 
 1. 确保 CubeMaster 可达
