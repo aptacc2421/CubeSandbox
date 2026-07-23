@@ -99,7 +99,7 @@ with zero performance overhead.
 | `sandbox.created` | Sandbox created | `sandbox_id`, `template_id` |
 | `sandbox.deleted` | Sandbox deleted | `sandbox_id` |
 | `sandbox.paused` | Sandbox paused | `sandbox_id` |
-| `sandbox.resumed` | Sandbox resumed | `sandbox_id` |
+| `sandbox.resumed` | Sandbox resumed | `sandbox_id`, `template_id` |
 
 ## Payload Format
 
@@ -129,9 +129,7 @@ Fields:
 - `event`: Event name
 - `timestamp`: Event time (RFC 3339)
 - `sandbox_id`: Unique sandbox identifier
-- `template_id`: Template identifier (always present in `created` events;
-  also available from the service layer for `resumed` but not yet
-  emitted by the handler — tracked for a future improvement)
+- `template_id`: Template identifier (present in `created` and `resumed` events)
 
 ## Security
 
