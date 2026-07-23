@@ -1,10 +1,57 @@
 # CubeSandbox Webhook Event Notifications
 
-CubeAPI can send webhook callbacks to user-configured HTTP endpoints when sandbox lifecycle events occur. Use cases include real-time monitoring, automated workflows, and audit trails.
+CubeAPI can send webhook callbacks to user-configured HTTP endpoints when
+sandbox lifecycle events occur. Use cases include real-time monitoring,
+automated workflows, and audit trails.
 
-## Quick Start
+## Development Verification (no CubeMaster, ~5 minutes)
 
-### 1. Configure Environment Variables
+For contributors or reviewers validating the webhook implementation without
+a running CubeSandbox cluster.
+
+### 1. Core logic — unit & integration tests
+
+```bash
+cd CubeAPI
+cargo test -- logging::http
+```
+
+10 tests covering: payload construction, HMAC signing, HTTP delivery, event
+filtering, retry behavior, and shutdown coordination. All use mock HTTP
+servers — no external dependencies.
+
+### 2. Receiver — standalone verification
+
+```bash
+# Terminal 1: Start the receiver
+cd examples/webhook-receiver
+WEBHOOK_SECRET=test-secret cargo run
+
+# Terminal 2: Simulate CubeAPI sending a webhook
+BODY='{"event":"sandbox.created","timestamp":"2026-07-20T12:00:00Z","sandbox_id":"sb-abc"}'
+SIG="sha256=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "test-secret" | cut -d' ' -f2)"
+curl -X POST http://127.0.0.1:9090/webhook \
+  -H "Content-Type: application/json" \
+  -H "X-Cube-Event: sandbox.created" \
+  -H "X-Cube-Signature: $SIG" \
+  -d "$BODY"
+# Terminal 1 should print the received webhook with HMAC verification OK
+```
+
+### 3. Code style
+
+```bash
+cd CubeAPI
+cargo fmt --check
+cargo clippy -- -D warnings
+```
+
+## Production Configuration (requires CubeMaster)
+
+Once CubeAPI has a working CubeMaster backend, configure webhooks via
+environment variables or CLI flags.
+
+### Environment variables
 
 ```bash
 export CUBE_WEBHOOK_URLS="https://your-server.com/webhook"
@@ -12,7 +59,7 @@ export CUBE_WEBHOOK_EVENTS="sandbox.created,sandbox.deleted,sandbox.paused,sandb
 export CUBE_WEBHOOK_SECRET="your-hmac-secret-key"
 ```
 
-### 2. Start CubeAPI
+### CLI flags
 
 ```bash
 cube-api --webhook-urls "https://your-server.com/webhook" \
@@ -23,68 +70,12 @@ cube-api --webhook-urls "https://your-server.com/webhook" \
 CLI flags take priority over environment variables. Multiple endpoints can be
 specified as a comma-separated list in `CUBE_WEBHOOK_URLS`.
 
-### 3. Verification
+### Full E2E test
 
-Two levels of verification. Level 1 requires no CubeMaster — approximately 5 minutes.
-
-#### 3.1 Quick Verification (no CubeMaster required, ~5 minutes)
-
-**Step 1: Webhook delivery logic** (mock HTTP server, ~10 seconds):
+With CubeAPI running and CubeMaster reachable, create a sandbox to trigger
+the `sandbox.created` event:
 
 ```bash
-cd CubeAPI
-cargo test -- logging::http
-```
-
-10 tests covering: payload construction, HMAC signing, HTTP delivery, event
-filtering, retry behavior, and shutdown coordination.
-
-**Step 2: Standalone receiver verification** (~1 minute):
-
-```bash
-# Terminal 1: Start the receiver
-cd examples/webhook-receiver
-WEBHOOK_SECRET=test-secret cargo run
-
-# Terminal 2: Simulate CubeAPI sending a webhook via curl
-BODY='{"event":"sandbox.created","timestamp":"2026-07-20T12:00:00Z","sandbox_id":"sb-abc"}'
-SIG="sha256=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "test-secret" | cut -d' ' -f2)"
-curl -X POST http://127.0.0.1:9090/webhook \
-  -H "Content-Type: application/json" \
-  -H "X-Cube-Event: sandbox.created" \
-  -H "X-Cube-Signature: $SIG" \
-  -d "$BODY"
-# Terminal 1 should print the received webhook content
-```
-
-**Step 3: Code style check** (~30 seconds):
-
-```bash
-cd CubeAPI
-cargo fmt --check
-cargo clippy -- -D warnings
-```
-
-#### 3.2 Full E2E (requires CubeSandbox cluster)
-
-Full verification requires a running CubeMaster. For cluster setup, see:
-
-- [Quick Start](../zh/guide/quickstart.md) — bare-metal / KVM environment
-- [Dev Environment](../zh/guide/dev-environment.md) — QEMU virtual machine
-
-Once the cluster is running:
-
-```bash
-# Terminal 1: Receiver
-cd examples/webhook-receiver && WEBHOOK_SECRET=test-secret cargo run
-
-# Terminal 2: CubeAPI
-cd CubeAPI
-CUBE_WEBHOOK_URLS=http://127.0.0.1:9090/webhook \
-CUBE_WEBHOOK_SECRET=test-secret \
-cargo run
-
-# Terminal 3: Create a sandbox
 curl -X POST http://localhost:3000/sandboxes \
   -H "Content-Type: application/json" \
   -d '{"templateID": "your-template-id"}'

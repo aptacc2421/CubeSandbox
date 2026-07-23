@@ -2,42 +2,20 @@
 
 CubeAPI 支持在沙箱生命周期事件发生时向用户配置的 HTTP 端点发送 Webhook 回调。可用于实时监控、自动化流程、审计追踪等场景。
 
-## 快速开始
+## 开发验证（不需要 CubeMaster，约 5 分钟）
 
-### 1. 配置环境变量
+适用于贡献者或 reviewer 验证 Webhook 实现，无需运行 CubeSandbox 集群。
 
-```bash
-export CUBE_WEBHOOK_URLS="https://your-server.com/webhook"
-export CUBE_WEBHOOK_EVENTS="sandbox.created,sandbox.deleted,sandbox.paused,sandbox.resumed"
-export CUBE_WEBHOOK_SECRET="your-hmac-secret-key"
-```
-
-### 2. 启动 CubeAPI
-
-```bash
-cube-api --webhook-urls "https://your-server.com/webhook" \
-         --webhook-events "sandbox.created,sandbox.deleted" \
-         --webhook-secret "your-hmac-secret-key"
-```
-
-CLI 参数优先级高于环境变量。Webhook URL 支持逗号分隔配置多个端点。
-
-### 3. 验证
-
-分两层验证。第一层不需要 CubeMaster 环境，5 分钟可跑通。
-
-#### 3.1 核心验证（不需要 CubeMaster，约 5 分钟）
-
-**Step 1: Webhook 投递逻辑** (mock HTTP server 验证，约 10 秒)：
+### 1. 核心逻辑 — 单元/集成测试
 
 ```bash
 cd CubeAPI
 cargo test -- logging::http
 ```
 
-10 个测试覆盖：payload 构建、HMAC 签名、HTTP 投递、事件过滤、重试、shutdown。
+10 个测试覆盖：payload 构建、HMAC 签名、HTTP 投递、事件过滤、重试、shutdown。全部使用 mock HTTP server，无需外部依赖。
 
-**Step 2: 接收端独立验证** (约 1 分钟)：
+### 2. 接收端 — 独立验证
 
 ```bash
 # 终端 1: 启动接收端
@@ -55,7 +33,7 @@ curl -X POST http://127.0.0.1:9090/webhook \
 # 终端 1 应打印接收到的 webhook 内容，签名验证通过
 ```
 
-**Step 3: 代码规范检查** (约 30 秒)：
+### 3. 代码规范检查
 
 ```bash
 cd CubeAPI
@@ -63,26 +41,33 @@ cargo fmt --check
 cargo clippy -- -D warnings
 ```
 
-#### 3.2 完整 E2E（需要 CubeSandbox 集群）
+## 生产配置（需要 CubeMaster）
 
-完整验证需要 CubeMaster 运行中（CubeAPI 通过它创建沙箱）。搭建方式参考:
+CubeAPI 连接 CubeMaster 后，通过环境变量或 CLI 参数配置 Webhook。
 
-- [快速开始](../zh/guide/quickstart.md) — 裸金属/KVM 环境
-- [开发环境](../zh/guide/dev-environment.md) — QEMU 虚拟机
-
-集群启动后：
+### 环境变量
 
 ```bash
-# 终端 1: 接收端
-cd examples/webhook-receiver && WEBHOOK_SECRET=test-secret cargo run
+export CUBE_WEBHOOK_URLS="https://your-server.com/webhook"
+export CUBE_WEBHOOK_EVENTS="sandbox.created,sandbox.deleted,sandbox.paused,sandbox.resumed"
+export CUBE_WEBHOOK_SECRET="your-hmac-secret-key"
+```
 
-# 终端 2: CubeAPI
-cd CubeAPI
-CUBE_WEBHOOK_URLS=http://127.0.0.1:9090/webhook \
-CUBE_WEBHOOK_SECRET=test-secret \
-cargo run
+### CLI 参数
 
-# 终端 3: 创建沙箱
+```bash
+cube-api --webhook-urls "https://your-server.com/webhook" \
+         --webhook-events "sandbox.created,sandbox.deleted" \
+         --webhook-secret "your-hmac-secret-key"
+```
+
+CLI 参数优先级高于环境变量。Webhook URL 支持逗号分隔配置多个端点。
+
+### 完整 E2E 测试
+
+CubeAPI 运行且 CubeMaster 可达时，创建沙箱触发事件：
+
+```bash
 curl -X POST http://localhost:3000/sandboxes \
   -H "Content-Type: application/json" \
   -d '{"templateID": "your-template-id"}'
