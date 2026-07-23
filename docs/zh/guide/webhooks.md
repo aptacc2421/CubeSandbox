@@ -213,7 +213,24 @@ cargo run
 
 ### 通用 HTTP 告警
 
-任何支持 HTTP POST 的告警平台都可以直接对接 CubeAPI Webhook。Payload 为标准 JSON，无需特殊 SDK。
+任何支持 HTTP POST 的告警平台都可以直接接收 CubeAPI Webhook 事件 — payload
+为标准 JSON，无需特殊 SDK。
+
+最简单的 shell 接收器：
+
+```bash
+#!/bin/bash
+# 监听 :8080，打印事件内容
+
+while true; do
+  echo -e "HTTP/1.1 200 OK\r\n" | nc -l -p 8080 -q 1 | while read -r line; do
+    echo "$line"
+  done
+done
+```
+
+生产环境中可以使用任何 HTTP 框架（axum、Express、Flask、nginx）接收 POST，
+解析 JSON body，按 `event` 字段路由到对应的告警通道。
 
 ## 故障排查
 

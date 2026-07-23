@@ -228,8 +228,28 @@ Sandbox events will be delivered as text messages to the WeCom group.
 
 ### Generic HTTP Alerts
 
-Any alerting platform that accepts HTTP POST can integrate directly with
-CubeAPI Webhooks. The payload is standard JSON — no special SDK required.
+Any alerting platform that accepts HTTP POST can receive CubeAPI Webhook
+events — the payload is standard JSON with no special SDK required.
+
+A minimal shell-based receiver that logs events and sends alerts:
+
+```bash
+#!/bin/bash
+# minimal-webhook-receiver.sh — listen on :8080, print events, forward to
+# your alerting platform via curl.
+#
+# Usage: ./minimal-webhook-receiver.sh
+
+while true; do
+  echo -e "HTTP/1.1 200 OK\r\n" | nc -l -p 8080 -q 1 | while read -r line; do
+    echo "$line"
+  done
+done
+```
+
+For production use, any HTTP server framework (axum, Express, Flask, nginx)
+can receive the POST, parse the JSON body, and route by `event` type to the
+appropriate alert channel.
 
 ## Troubleshooting
 
