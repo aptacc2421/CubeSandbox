@@ -154,7 +154,7 @@ CMD ["uvicorn", "app:app", "--app-dir", "/srv", "--host", "0.0.0.0", "--port", "
 | 变量               | 默认值              | 说明                                                   |
 | ------------------ | ------------------- | ------------------------------------------------------ |
 | `ENVD_PORT`        | `49983`             | envd 监听的端口                                        |
-| `ENVD_EXTRA_ARGS`  | *(空)*              | 追加到 `-port` 之后的额外参数。若未包含 `-isnotfc`，脚本会自动追加以跳过 Firecracker MMDS 查询。 |
+| `ENVD_EXTRA_ARGS`  | *(空)*              | 追加到 `-port` 之后的额外参数。若未包含 `-isnotfc`，脚本会自动追加以跳过 Firecracker MMDS 查询。只接受 cube-envd 已声明的 flag，其它参数（含拼写错误）会让 envd 启动即 exit 2，而不是静默回退默认值；`-cmd` 与 `-cgroup-root` 已识别但未实现，仅警告并跳过。 |
 | `ENVD_LOG_FILE`    | `/var/log/envd.log` | envd stdout/stderr 落盘位置；设为 `-` 则继承容器 stdio |
 | `ENVD_BIN`         | `/usr/bin/envd`     | 当 envd 安装在别处时覆盖                               |
 
