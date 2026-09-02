@@ -35,7 +35,6 @@ DECLARED_DIFFERENT = {
     "proc_sendsignal_nested_probe": "nested-selector: BOTH refuse to act on the process — upstream rejects the shape (501), cube-envd resolves to no pid and returns not_found; neither signals a process (no destructive side effect)",
     "fs_bad_json": "JSON parse error wording is parser-specific (code and status equal)",
     "proc_missing_cmd": "missing-binary stderr prefix: upstream nice(1) wording vs cube-envd (exit 127 and event flow equal)",
-    "fs_stat_symlink_probe": "symlink Stat/ListDir: cube-envd lstat's (type SYMLINK, lowercase-l perms, real target); upstream follows the link (target type, uppercase-L, link-self target). Documented known difference; SDKs branch on `code`, not link semantics",
     "rest_init_timestamp_out_of_range": "timestamp outside i64-nanosecond range (9999): upstream UnixNano() wraps and drops as stale (204); cube-envd rejects as a caller bug (400). Neither applies anything nor moves the gate",
 }
 # Fixtures that depend on prior state in ways the rerun reproduces
@@ -49,7 +48,7 @@ TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z")
 HEADERS_KEPT = {"Content-Type", "Content-Encoding", "Cache-Control",
                 "Access-Control-Allow-Origin", "Access-Control-Expose-Headers",
                 "Access-Control-Allow-Methods", "Access-Control-Allow-Headers",
-                "Access-Control-Max-Age"}
+                "Access-Control-Max-Age", "X-E2B-Legacy-SDK"}
 
 
 def normalize(obj, path=""):
