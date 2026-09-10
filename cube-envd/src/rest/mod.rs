@@ -8,13 +8,8 @@
 //! TimeFormat）、content_disposition.rs（↔ mime.FormatMediaType）、
 //! preconditions.rs（条件请求决策 ↔ fs.go checkPreconditions）。
 
-pub mod content_disposition;
-pub mod encoding;
 pub mod files;
-pub mod httpdate;
 pub mod metrics;
-pub mod preconditions;
-pub mod ranges;
 
 use std::collections::HashMap;
 use std::sync::Arc;

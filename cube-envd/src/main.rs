@@ -18,6 +18,7 @@ mod connect;
 mod cors;
 mod error;
 mod exec;
+mod filesystem;
 mod go_compat;
 mod legacy;
 mod msg;

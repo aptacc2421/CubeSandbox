@@ -49,12 +49,12 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::auth::{resolve_path, User};
 use crate::connect;
 use crate::error::{ConnectCode, ConnectError};
-use crate::go_compat::errno::{errno_text, go_path_error};
-use crate::msg::filesystem::{
+use crate::filesystem::wire::{
     CreateWatcherRequest, CreateWatcherResponse, EventType, FilesystemEvent,
     GetWatcherEventsRequest, GetWatcherEventsResponse, RemoveWatcherRequest, RemoveWatcherResponse,
     StartEvent, WatchDirRequest, WatchDirResponse,
 };
+use crate::go_compat::errno::{errno_text, go_path_error};
 
 /// The exact mask fsnotify requests for its default op set
 /// Create|Write|Remove|Rename|Chmod (`fsnotify.go:424-426` expanding through

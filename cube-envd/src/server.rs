@@ -20,10 +20,10 @@ use crate::auth::{self, User};
 use crate::connect;
 use crate::cors;
 use crate::error::{ConnectCode, ConnectError};
+use crate::filesystem as fs_svc;
 use crate::legacy;
 use crate::rest;
-use crate::services::watch as watch_svc;
-use crate::services::{filesystem as fs_svc, process as proc_svc};
+use crate::services::{process as proc_svc, watch as watch_svc};
 use crate::state::AppState;
 
 pub(crate) const MAX_UNARY_BODY: usize = 4 * 1024 * 1024;
@@ -512,7 +512,7 @@ async fn fs_watch_dir(
     if let Err(e) = rpc_token_check(&state, &headers) {
         return e.into_response();
     }
-    let req: crate::msg::filesystem::WatchDirRequest =
+    let req: crate::filesystem::wire::WatchDirRequest =
         match read_unary_request(&headers, body).await {
             Ok(r) => r,
             Err(e) => return e.into_response(),
@@ -557,17 +557,17 @@ macro_rules! watch_unary {
 
 watch_unary!(
     fs_create_watcher,
-    crate::msg::filesystem::CreateWatcherRequest,
+    crate::filesystem::wire::CreateWatcherRequest,
     watch_svc::create_watcher
 );
 watch_unary!(
     fs_get_watcher_events,
-    crate::msg::filesystem::GetWatcherEventsRequest,
+    crate::filesystem::wire::GetWatcherEventsRequest,
     watch_svc::get_watcher_events
 );
 watch_unary!(
     fs_remove_watcher,
-    crate::msg::filesystem::RemoveWatcherRequest,
+    crate::filesystem::wire::RemoveWatcherRequest,
     watch_svc::remove_watcher
 );
 
