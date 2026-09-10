@@ -25,6 +25,9 @@ GO_DIR = sys.argv[1] if len(sys.argv) > 1 else "fixtures"
 RS_DIR = sys.argv[2] if len(sys.argv) > 2 else "fixtures-rust"
 
 # Fixtures where cube-envd intentionally differs (cube-envd/README.md).
+# Do not re-add entries for fixtures that currently PASS: an allowlisted
+# fixture reports DECLARED-DIFF instead of FAIL, so listing a passing
+# fixture silently downgrades the gate for every future regression.
 # (fs_watch_unary_probe left this list when PR-B implemented the watch
 # family; proc_sendinput_probe / proc_connect_missing /
 # proc_sendsignal_nested_probe left it when selector decoding switched to
