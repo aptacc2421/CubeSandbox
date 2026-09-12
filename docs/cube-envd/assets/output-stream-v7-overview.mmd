@@ -1,0 +1,30 @@
+flowchart LR
+  subgraph VM["沙箱 MicroVM"]
+    direction TB
+    child["子进程<br/>stdout / stderr"]
+    pump["管道泵<br/>READ_CHUNK 32 KiB<br/>无订阅者：丢弃但排空，不卡子进程"]
+    child --> pump
+  end
+
+  subgraph SUP["supervisor（独立任务，不被背压影响）"]
+    direction TB
+    dl["deadline：with_cause(timeout)<br/>→ kill_process_tree"]
+    reaping["completion<br/>→ remove_process"]
+  end
+
+  SQ["订阅者队列<br/>TerminalChannel(PumpEvent)<br/>24 槽 ＝ 23 数据 ＋ 1 终态(OwnedPermit)"]
+  pump -->|"publish_data（满则等，可被闩锁打断）"| SQ
+  pump -->|"publish_terminal（用预留 permit，必达）"| SQ
+  dl -->|"publish_control（best-effort，仅提前提示）"| SQ
+
+  DS["drive_stream（每连接）<br/>select：closed → deadline → 驱逐闩锁<br/>→ 等数据槽 → recv → keepalive<br/>每连接编码 Start / 数据 / End＋trailer"]
+  SQ -->|"Subscription"| DS
+
+  BQ["body 队列<br/>TerminalChannel(Bytes)<br/>8 槽 ＝ 7 数据 ＋ 1 终态"]
+  DS -->|"reserve_data（cancel-safe，扁平 arm）<br/>帧留在 pending，拿到 permit 才 take"| BQ
+  BQ --> FS["frame_stream_response"] --> HYP["hyper"] --> PX["CubeProxy"] --> CLI["SDK / 终端"]
+
+  REAP["reaper（每 bus 1 s）<br/>stalled_since 超 300 s 才动手<br/>（发送失败置位，成功即清除）"]
+  REAP -->|"watch 闩锁 send(true) ＋ 从表移除"| SQ
+  REAP -.->|"唤醒被阻塞的 reserve()；该连接用终态槽<br/>报 resource_exhausted: no progress"| DS
+  DS -.->|"Drop guard：断开立刻摘除，不等下一次 publish"| SQ

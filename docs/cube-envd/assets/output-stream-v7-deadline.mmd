@@ -1,0 +1,14 @@
+sequenceDiagram
+  autonumber
+  participant S as supervisor
+  participant Q as 订阅者队列
+  participant C as 子进程
+  participant D as drive_stream
+
+  Note over S,D: 带外判定：正确性不依赖下面这条 in-band 事件
+  S->>Q: publish_control(DeadlineExceeded)（best-effort，丢了也不算错）
+  S->>C: with_cause(timeout) → kill_process_tree
+  C->>Q: 进程结束 → publish_terminal(End, killed_by=timeout)
+  Q->>D: End 事件
+  D->>D: trailer 看 end.killed_by == timeout → deadline_exceeded
+  Note over S,D: 即使 DeadlineExceeded 被丢，trailer 仍正确

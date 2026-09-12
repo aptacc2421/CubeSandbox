@@ -1,0 +1,13 @@
+flowchart LR
+  START["客户端在读取某进程的输出"] --> Q{"订阅者队列还有数据槽吗？"}
+
+  Q -->|"有"| OK["正常投递<br/>publish_data 直接入队"]
+  Q -->|"没有"| WAIT["publish_data 等待<br/>（闩锁 select，可被打断）"]
+  WAIT --> BP["背压 ──► 泵停止读管道 ──► 管道满 ──► 子进程 write() 阻塞<br/>结果：子进程被限速，零丢失"]
+
+  WAIT --> CHK{"300 s 内腾出过数据槽？"}
+  CHK -->|"腾出过（慢但活着）"| RESUME["清除 stalled_since，继续投递<br/>慢 ≠ 死，不驱逐"]
+  CHK -->|"一直没腾出（卡死）"| EVICT["reaper：置闩锁 ＋ 移除订阅者<br/>该连接用终态槽发 resource_exhausted: no progress for 300s"]
+
+  CLOSE["客户端断开：Drop guard 立刻摘除订阅者<br/>（不等下一次 publish）"] --> FREE["释放订阅者，其他订阅者与子进程无感"]
+  OK --> RESUME

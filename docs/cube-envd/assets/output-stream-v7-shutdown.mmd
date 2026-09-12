@@ -1,0 +1,18 @@
+sequenceDiagram
+  autonumber
+  participant C as 子进程
+  participant P as 管道泵
+  participant Q as 订阅者队列
+  participant D as drive_stream
+  participant S as supervisor
+  participant T as 进程表
+
+  C->>P: 写完最后数据后退出
+  P->>P: wait() 返回 → drain：timeout 只套在 read 上，读到 EOF
+  P->>Q: publish_data（背压等待不设界，可被闩锁打断）
+  P->>Q: publish_terminal(End)（常驻 permit，必达）
+  P->>S: completion_tx.send（提前）
+  S->>T: remove_process → List 立刻不再报该进程
+  Q->>D: End 事件
+  D->>D: trailer 看 end.killed_by：为空 → end_stream_ok
+  D-->>Q: 写 body 队列的终态槽
