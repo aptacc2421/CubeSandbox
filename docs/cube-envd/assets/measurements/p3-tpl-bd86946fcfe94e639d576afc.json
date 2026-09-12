@@ -1,0 +1,105 @@
+{
+  "template": "tpl-bd86946fcfe94e639d576afc",
+  "reps": 5,
+  "sizes": {
+    "4MiB": {
+      "runs": [
+        {
+          "seconds": 0.098,
+          "MBps": 42.9,
+          "delivered": 5597418
+        },
+        {
+          "seconds": 0.128,
+          "MBps": 32.9,
+          "delivered": 5597418
+        },
+        {
+          "seconds": 0.189,
+          "MBps": 22.1,
+          "delivered": 5597418
+        },
+        {
+          "seconds": 0.2,
+          "MBps": 21.0,
+          "delivered": 5597418
+        },
+        {
+          "seconds": 0.15,
+          "MBps": 28.0,
+          "delivered": 5597418
+        }
+      ],
+      "MBps_min": 21.0,
+      "MBps_median": 28.0,
+      "MBps_max": 42.9,
+      "delivered_ok": true,
+      "prof": {
+        "samples": {
+          "active": 12,
+          "idle": 9,
+          "total": 21
+        },
+        "active_window_wait_channels": {
+          "futex_wait_queue": 26,
+          "0": 18,
+          "ep_poll": 4
+        },
+        "cpu_s": 0.82,
+        "active_tx_queue_max": 43737
+      }
+    },
+    "32MiB": {
+      "runs": [
+        {
+          "seconds": 1.384,
+          "MBps": 24.3,
+          "delivered": 44778602
+        },
+        {
+          "seconds": 1.204,
+          "MBps": 27.9,
+          "delivered": 44778602
+        },
+        {
+          "seconds": 0.977,
+          "MBps": 34.4,
+          "delivered": 44778602
+        },
+        {
+          "seconds": 0.964,
+          "MBps": 34.8,
+          "delivered": 44778603
+        },
+        {
+          "seconds": 0.821,
+          "MBps": 40.8,
+          "delivered": 44778603
+        }
+      ],
+      "MBps_min": 24.3,
+      "MBps_median": 34.4,
+      "MBps_max": 40.8,
+      "delivered_ok": true,
+      "prof": {
+        "samples": {
+          "active": 77,
+          "idle": 10,
+          "total": 87
+        },
+        "active_window_wait_channels": {
+          "futex_wait_queue": 161,
+          "0": 126,
+          "ep_poll": 19,
+          "__vm_munmap": 1,
+          "kernel_clone": 1
+        },
+        "cpu_s": 7.32,
+        "active_tx_queue_max": 714012
+      }
+    }
+  },
+  "envd_pid": "2",
+  "envd_exe": "/usr/local/bin/envd",
+  "envd_sha256": "02467a008e1222e2948c724134ce773109a961248fdd4fde9c53aa497e49cfdd"
+}

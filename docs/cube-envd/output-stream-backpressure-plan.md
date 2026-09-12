@@ -610,8 +610,8 @@ loop {
 | 参数 | 取值 | 依据 / 历史 |
 |---|---|---|
 | 驱逐阈值 `EVICT_AFTER` | **300 s** | 门槛 = 阈值内至少腾出一个数据槽 ≈ 43.7 KiB/300 s ≈ **149 B/s**。30 s 时 ≈1.5 KiB/s（两者都远低于弱网带宽） |
-| 订阅者队列 | **1 MiB ≈ 23 数据 + 1 终态** | 现状 ≈2.8 MiB/连接 + 2.8 MiB 共享环；背压到位后队列只影响吞吐 |
-| body 队列 | **7 数据 + 1 终态** | 沿用并强化现状的预留槽不变量 |
+| 订阅者队列 | **3 数据 + 1 终态**（每帧 128 KiB 读块 → ~175 KiB 帧，≈0.5 MiB） | 现状 ≈2.8 MiB/连接 + 2.8 MiB 共享环；背压到位后队列只影响吞吐。读块放大到 128 KiB 后按每 attach ≈1 MiB 预算重算，见 `output-stream-throughput-profile-zh.md` |
+| body 队列 | **3 数据 + 1 终态** | 沿用并强化现状的预留槽不变量 |
 | attach 上限 | **per-process 8 + 全局 64** | 验收 #7 的上界需要全局界 |
 | 提交形态 | **1 PR / 3 commit** | 结构 → 策略 → 文档 |
 
@@ -710,3 +710,10 @@ loop {
 约 **3 ms/帧**（32 KiB 读块 → 43.7 KiB base64 帧，2000+ 帧）。可疑点按可能性排序：① 每帧两跳 channel 交接（`publish_data` 的 permit + body permit）带来的调度往返；② 每帧 `serde_json::to_value` 再序列化；③ 固定的 32 KiB 读块。这与之前记录的 `/files` 下载差距（2.9×，缺 sendfile）是**同一类**问题：cube-envd 的逐帧/编码数据面没有批量路径。
 
 对 agent/终端场景（KB/s 级输出）这个量级无关紧要；对"把大文件 `cat` 出来"则能感知。建议作为**独立 PR** 处理（先 profile 再动手），本次不扩大改动面。
+
+**后续（已做，见 `output-stream-throughput-profile-zh.md`）**：真机 profile 的结论是
+"Nagle 不是原因、网络写路径不是原因（同 guest 的 `/files` 只要 57 ms）、编码只占
+~5%，~95% 是每帧一次的交接"，修法是把帧做大 + 让每帧更便宜（读块 128 KiB +
+`F_SETPIPE_SZ`、`publish_data` 无等待快路径、JSON 单缓冲直写、队列深度重算），
+并把上表的 32 MiB 差距从 **34.4 MB/s → 103.7 MB/s**（guest 内单次 147 MB/s，
+同口径 Go 为 111.6 / ~114 MB/s），全量交付不变。

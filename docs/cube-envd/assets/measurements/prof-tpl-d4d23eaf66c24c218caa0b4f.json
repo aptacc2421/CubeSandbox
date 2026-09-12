@@ -1,0 +1,51 @@
+{
+  "template": "tpl-d4d23eaf66c24c218caa0b4f",
+  "sizes": {
+    "4MiB": {
+      "seconds": 0.07,
+      "MBps": 57.0,
+      "delivered": 5597419,
+      "exhausted": false,
+      "prof": {
+        "samples": 3,
+        "thread_states": {
+          "S": 12
+        },
+        "top_wait_channels": {
+          "futex_wait_queue": 6,
+          "ep_poll": 3,
+          "hrtimer_nanosleep": 2,
+          "0": 1
+        },
+        "cpu_user_s": 0.0,
+        "cpu_sys_s": 0.08,
+        "tcp_tx_queue_max": 0
+      }
+    },
+    "32MiB": {
+      "seconds": 0.34,
+      "MBps": 97.6,
+      "delivered": 44778603,
+      "exhausted": false,
+      "prof": {
+        "samples": 10,
+        "thread_states": {
+          "S": 32,
+          "R": 9
+        },
+        "top_wait_channels": {
+          "futex_wait_queue": 22,
+          "ep_poll": 7,
+          "0": 7,
+          "hrtimer_nanosleep": 5
+        },
+        "cpu_user_s": 0.16,
+        "cpu_sys_s": 0.3,
+        "tcp_tx_queue_max": 0
+      }
+    }
+  },
+  "envd_pid": "3",
+  "envd_exe": "/usr/bin/envd",
+  "envd_sha256": "4c71212238cea9a2071554b115948f1da817ca6c00376ac2e1cfbb324b89ae9a"
+}
