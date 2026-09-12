@@ -1,0 +1,45 @@
+{
+  "big_log_bytes": 67947660,
+  "cat_50m_sdk_like": {
+    "errors": [
+      "{}"
+    ],
+    "saw_end": true,
+    "seconds": 6.57,
+    "stdout_bytes": 67947660,
+    "wire_bytes": 90676487
+  },
+  "health_after": "STILL-ALIVE",
+  "label": "bp",
+  "pty_flood": {
+    "bytes_received": 60319193,
+    "errors": [],
+    "handle_error": true
+  },
+  "sandbox_id": "e1422f67e1284e4ba8da65e5b8df3e12",
+  "yes_fast_drain": {
+    "errors": [],
+    "saw_end": false,
+    "seconds": 2.05,
+    "stdout_bytes": 0,
+    "wire_bytes": 17830744
+  },
+  "yes_sdk_like": {
+    "errors": [
+      "{}"
+    ],
+    "saw_end": true,
+    "seconds": 2.07,
+    "stdout_bytes": 10809994,
+    "wire_bytes": 14426122
+  },
+  "yes_throttled_1ms": {
+    "errors": [
+      "{}"
+    ],
+    "saw_end": true,
+    "seconds": 2.47,
+    "stdout_bytes": 13263094,
+    "wire_bytes": 17699797
+  }
+}

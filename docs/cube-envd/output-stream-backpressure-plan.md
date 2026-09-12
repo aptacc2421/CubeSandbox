@@ -683,3 +683,30 @@ loop {
 * `output_drain_grace` 的"后代持有管道时仍不丢已读字节"缺少专门用例（现有 `deadline_does_not_misclassify_child_reaped_during_output_drain` 覆盖了分类，未覆盖 1 ms grace 下的逐字节完整）。
 * "body 满时 keepalive 被跳过 / 订阅者队列背压时 keepalive 与 deadline 仍触发"缺少专门用例。
 * `MAX_SUBSCRIBERS_PER_PROCESS` 取值（8 或 16）待确认；当前为 8，改动是一行常量。
+
+### 真机复测（2026-09-13，模板 `tpl-bd86946fcfe94e639d576afc`，注入 sha256 `02467a00…`）
+
+溯源：`/proc/2/exe -> /usr/local/bin/envd`，sha256 = `02467a008e1222e2948c724134ce773109a961248fdd4fde9c53aa497e49cfdd` ✓
+
+| 验收 | 改前（`c1cd0a0d`） | 现在 | 结果 |
+|---|---|---|---|
+| #1 大输出完整（`threshold.py` 1–32 MiB） | 3 MiB 起 `resource_exhausted` | 1/2/3/4/6/8/16/32 MiB **全部完整 + EndEvent**，`exhausted=false` | ✅ |
+| #1 `cat` 50 MiB（SDK 式消费） | 65,536 B 后报错 | **67,947,660 B 完整** | ✅ |
+| #3 慢但活着零丢失（每帧 sleep 1 ms） | 81 KB 后 `64 events dropped` | **13,263,094 B 完整、无错误** | ✅ |
+| #2 PTY 洪流 1.5 s | 40 KB 后 `RuntimeError` | **60,319,193 B，会话存活、无错误** | ✅ |
+| #5 之后 envd 仍健康 | — | `STILL-ALIVE` | ✅ |
+| #9/#10 deadline 与回收不被"不读的客户端"拖住 | — | 单测覆盖（`unread_full_response_does_not_block_deadline_or_reaping`） | ✅（单测） |
+
+**新增发现（下一步，不属本 PR 的正确性范围）**：进程流路径的**持续吞吐**现在可以完整测了，同脚本 A/B 显示明显低于 Go:
+
+| 大小 | stock MB/s | 本分支 MB/s | 差距 |
+|---|---|---|---|
+| 2 MiB | 53.4 | 29.7 | 1.8× |
+| 4 MiB | 106.8 | 53.4 | 2.0× |
+| 8 MiB | 152.5 | 13.5 | 11.3× |
+| 16 MiB | 164.2 | 10.4 | 15.8× |
+| 32 MiB | 203.4 | 27.4 | 7.4× |
+
+约 **3 ms/帧**（32 KiB 读块 → 43.7 KiB base64 帧，2000+ 帧）。可疑点按可能性排序：① 每帧两跳 channel 交接（`publish_data` 的 permit + body permit）带来的调度往返；② 每帧 `serde_json::to_value` 再序列化；③ 固定的 32 KiB 读块。这与之前记录的 `/files` 下载差距（2.9×，缺 sendfile）是**同一类**问题：cube-envd 的逐帧/编码数据面没有批量路径。
+
+对 agent/终端场景（KB/s 级输出）这个量级无关紧要；对"把大文件 `cat` 出来"则能感知。建议作为**独立 PR** 处理（先 profile 再动手），本次不扩大改动面。

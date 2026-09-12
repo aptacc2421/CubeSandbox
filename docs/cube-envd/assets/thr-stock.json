@@ -1,0 +1,58 @@
+{
+  "1MiB": {
+    "delivered": 1399434,
+    "expected_min": 1048576,
+    "exhausted": false,
+    "end": true,
+    "seconds": 0.04
+  },
+  "2MiB": {
+    "delivered": 2798762,
+    "expected_min": 2097152,
+    "exhausted": false,
+    "end": true,
+    "seconds": 0.05
+  },
+  "3MiB": {
+    "delivered": 4198090,
+    "expected_min": 3145728,
+    "exhausted": false,
+    "end": true,
+    "seconds": 0.05
+  },
+  "4MiB": {
+    "delivered": 5597418,
+    "expected_min": 4194304,
+    "exhausted": false,
+    "end": true,
+    "seconds": 0.05
+  },
+  "6MiB": {
+    "delivered": 8396074,
+    "expected_min": 6291456,
+    "exhausted": false,
+    "end": true,
+    "seconds": 0.06
+  },
+  "8MiB": {
+    "delivered": 11194730,
+    "expected_min": 8388608,
+    "exhausted": false,
+    "end": true,
+    "seconds": 0.07
+  },
+  "16MiB": {
+    "delivered": 22389354,
+    "expected_min": 16777216,
+    "exhausted": false,
+    "end": true,
+    "seconds": 0.13
+  },
+  "32MiB": {
+    "delivered": 44778602,
+    "expected_min": 33554432,
+    "exhausted": false,
+    "end": true,
+    "seconds": 0.21
+  }
+}
