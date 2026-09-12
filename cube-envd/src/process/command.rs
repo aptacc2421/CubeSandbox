@@ -113,8 +113,8 @@ pub fn start(
     let cwd = match engine::resolve_cwd(req.process.cwd.as_deref(), &user) {
         Ok(c) => c,
         Err(msg) => {
-            // Invalid working directory: reject like upstream instead of
-            // silently running in `/` (#1227: no silent success).
+            // Invalid working directory: reject like upstream rather than
+            // silently running in `/`.
             return stream_error_response(ConnectError::new(ConnectCode::InvalidArgument, msg));
         }
     };

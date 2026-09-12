@@ -211,13 +211,13 @@ pub(super) fn child_pre_exec(
     })
 }
 
-/// One command to start, taking the request shape upstream's `handler.New` does:
-/// the command and an optional pty travel together, and upstream branches on the
-/// pty inside `Start` (`handler.go:192-232`) where the plumbing here is chosen
-/// once. The child is created with `clone(CLONE_VM|CLONE_VFORK)` (see
-/// [`super::child`]), falling back to `fork` only when the host rejects it; a
-/// failure that came back through the child's report pipe is a real command error
-/// and is not retried, or the command would run twice.
+/// One command to start, taking the request shape upstream's `handler.New` takes:
+/// the command with an optional pty, which upstream splits on at `handler.go:192`
+/// and branches on again in `Start` (`handler.go:425`). The child is created with
+/// `clone(CLONE_VM|CLONE_VFORK)` (see [`super::child`]), falling back to `fork`
+/// only when the host rejects it; a failure that came back through the child's
+/// report pipe is a real command error and is not retried, or the command would
+/// run twice.
 ///
 /// `posix_spawn` itself is not usable here because it cannot express the
 /// credential drop (the daemon runs as root and commands run as the requested
@@ -349,8 +349,7 @@ pub fn spawn(req: Spawn<'_>) -> std::io::Result<SpawnedProcess> {
     // A bounded broadcast (capacity 64) is the per-process output bus: the
     // pump publishes here and each connection subscribes. A subscriber that
     // falls behind the ring is dropped on its own `Lagged` error instead of
-    // backpressuring the pump — the cancel-on-overflow shape upstream #3292
-    // recommends, so one stale subscriber can't wedge the whole fan-out.
+    // backpressuring the pump, so one stale subscriber can't wedge the fan-out.
     // `initial` is created *before* the pump task so the first subscriber
     // never misses an early event.
     let (tx, initial) = broadcast::channel::<PumpEvent>(64);
