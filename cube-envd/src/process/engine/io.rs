@@ -242,6 +242,32 @@ mod tests {
     use crate::process::engine::tests::current_user;
     use std::collections::HashMap;
 
+    /// What a read error means, and the text the client sees, differ by output
+    /// kind: reading a pty master fails with EIO once the last slave closes,
+    /// which is the normal end of an interactive session, while a pipe read
+    /// error is a real failure that the terminal event must report.
+    #[test]
+    fn terminal_messages_depend_on_the_output_kind() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let exited = || Ok(std::process::ExitStatus::from_raw(0));
+        let read_failed = || Err(std::io::Error::from_raw_os_error(libc::EIO));
+
+        match terminal_after_output("pty", read_failed(), exited()) {
+            PumpEvent::End(end) => assert!(end.exited, "pty read error must keep the exit status"),
+            other => panic!("pty read error became a spawn error: {other:?}"),
+        }
+        match terminal_after_output("process output", read_failed(), exited()) {
+            PumpEvent::SpawnError(message) => {
+                assert!(
+                    message.starts_with("process output read failed:"),
+                    "label lost from the client-visible message: {message}"
+                );
+            }
+            other => panic!("a pipe read error must be a spawn error, got {other:?}"),
+        }
+    }
+
     #[test]
     fn oom_metadata_requires_sigkill_and_preserves_recorded_causes() {
         use std::os::unix::process::ExitStatusExt;

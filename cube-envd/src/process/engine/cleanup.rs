@@ -30,7 +30,7 @@ pub fn kill_process_group(pid: u32, signo: i32) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::process::engine::tests::current_user;
-    use crate::process::engine::{spawn_with_cgroup, PumpEvent};
+    use crate::process::engine::{spawn_pty, spawn_with_cgroup, PumpEvent};
     use std::collections::HashMap;
 
     #[tokio::test]
@@ -44,6 +44,40 @@ mod tests {
             &user,
             false,
             None,
+            None,
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        kill_process_group(proc.pid, libc::SIGKILL).unwrap();
+        let mut end = None;
+        loop {
+            match proc.initial.recv().await {
+                Ok(PumpEvent::End(e)) => {
+                    end = Some(e);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        let end = end.unwrap();
+        assert_eq!(end.exit_code, -1);
+        assert!(!end.exited);
+        assert_eq!(end.status, "signal: killed");
+    }
+
+    /// The pty path reaps and decorates its terminal event the same way pipes
+    /// do, including when the process group is killed from outside.
+    #[tokio::test]
+    async fn signal_end_event_shape_for_a_pty() {
+        let user = current_user();
+        let mut proc = spawn_pty(
+            "/bin/sh",
+            &["-c".into(), "sleep 30".into()],
+            HashMap::new(),
+            "/".into(),
+            &user,
+            (80, 24),
             None,
         )
         .unwrap();
