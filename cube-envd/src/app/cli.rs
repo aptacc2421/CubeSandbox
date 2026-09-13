@@ -55,6 +55,14 @@ pub(crate) struct Cli {
     /// flags; the equivalent environment variables still work and the flag wins.
     pub(crate) blocking_threads: Option<usize>,
     pub(crate) download_max_bodies: Option<usize>,
+
+    /// cube-envd extension (no upstream equivalent): the requested cap for the
+    /// cgroup v2 `user`/`ptys` subtrees. It exists as a flag because
+    /// `ENVD_EXTRA_ARGS` is the entrypoint's documented tuning surface and only
+    /// accepts *declared* flags; the equivalent environment variable still
+    /// works and the flag wins (`process/cgroup/mod.rs` resolves it against
+    /// `CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES`).
+    pub(crate) cgroup_memory_max: Option<u64>,
 }
 
 /// Exit status carried by `parse_cli`'s `Err` variant — a process exit code,
@@ -73,6 +81,7 @@ pub(crate) fn parse_cli(args: &[String]) -> Result<Cli, ExitCode> {
     let mut port = DEFAULT_PORT;
     let mut blocking_threads = None;
     let mut download_max_bodies = None;
+    let mut cgroup_memory_max = None;
     let mut version = false;
     let mut commit = false;
     let mut rest = args;
@@ -180,6 +189,33 @@ pub(crate) fn parse_cli(args: &[String]) -> Result<Cli, ExitCode> {
                     download_max_bodies = Some(value);
                 }
             }
+            // cube-envd extension: the memory cap of the cgroup v2 user/ptys
+            // subtrees, so a deployment can set it through ENVD_EXTRA_ARGS
+            // (the entrypoint only forwards flags it can name). Validation
+            // matches the environment variable: out-of-range values are
+            // clamped and warned about in process/cgroup/mod.rs, but zero or a
+            // non-number is a usage error like any other bad flag value.
+            // `-cgroup-root` stays in UNIMPLEMENTED: it is a deliberate
+            // non-feature (see above), not an oversight.
+            "cgroup-memory-max-bytes" => {
+                let raw = match inline {
+                    Some(v) => v,
+                    None => {
+                        let (v, tail) = rest.split_first().ok_or_else(|| {
+                            fail("flag needs an argument: -cgroup-memory-max-bytes")
+                        })?;
+                        rest = tail;
+                        v
+                    }
+                };
+                cgroup_memory_max =
+                    Some(raw.parse::<u64>().ok().filter(|b| *b > 0).ok_or_else(|| {
+                        fail(&format!(
+                            "invalid value {raw:?} for flag -cgroup-memory-max-bytes: \
+                             expected a positive byte count"
+                        ))
+                    })?);
+            }
             // Known but unimplemented: soak up a trailing bare value so it is
             // not taken for a positional argument. A '-'-prefixed token is
             // left for the next iteration, so a real flag after it still
@@ -208,6 +244,7 @@ pub(crate) fn parse_cli(args: &[String]) -> Result<Cli, ExitCode> {
         port,
         blocking_threads,
         download_max_bodies,
+        cgroup_memory_max,
     })
 }
 
@@ -263,6 +300,10 @@ fn print_usage() {
         NOT IMPLEMENTED: command to run on daemon start
   -cgroup-root string
         NOT IMPLEMENTED: cgroup root directory
+  -cgroup-memory-max-bytes uint
+        requested memory limit for the cgroup v2 user/ptys subtrees, in bytes
+        (cube-envd extension; default derived from guest memory, and it
+        overrides CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES)
   -version
         print the version
   -commit
@@ -334,6 +375,65 @@ mod tests {
         assert_eq!(port(&["-cgroup-root"]), Ok(DEFAULT_PORT));
         assert_eq!(port(&["-cmd"]), Ok(DEFAULT_PORT));
         assert_eq!(port(&["-cmd", "-cgroup-root"]), Ok(DEFAULT_PORT));
+    }
+
+    fn cgroup_memory_max(items: &[&str]) -> Option<u64> {
+        parse_cli(&args(items))
+            .map(|c| c.cgroup_memory_max)
+            .ok()
+            .flatten()
+    }
+
+    /// cube-envd's own cgroup memory knob exists as a flag so a deployment can
+    /// inject it through `ENVD_EXTRA_ARGS`; `process/cgroup/mod.rs` gives the
+    /// flag precedence over `CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES`.
+    #[test]
+    fn cli_cgroup_memory_max_bytes_is_parsed() {
+        assert_eq!(
+            cgroup_memory_max(&["-cgroup-memory-max-bytes", "268435456"]),
+            Some(268_435_456)
+        );
+        assert_eq!(
+            cgroup_memory_max(&["-cgroup-memory-max-bytes=268435456"]),
+            Some(268_435_456)
+        );
+        assert_eq!(cgroup_memory_max(&[]), None);
+        // The value is required, and a flag after it still takes effect.
+        assert_eq!(exit_code(&["-cgroup-memory-max-bytes"]), Some(2));
+        assert_eq!(
+            port(&["-cgroup-memory-max-bytes", "1", "-port", "7000"]),
+            Ok(7000)
+        );
+        // Repeating it is Go's last-wins, not an error.
+        assert_eq!(
+            cgroup_memory_max(&[
+                "-cgroup-memory-max-bytes",
+                "1",
+                "-cgroup-memory-max-bytes",
+                "2"
+            ]),
+            Some(2)
+        );
+    }
+
+    /// A malformed or meaningless value fails the parse instead of quietly
+    /// falling back to the derived cap — that silent fallback is exactly what
+    /// `ENVD_EXTRA_ARGS` validation exists to prevent.
+    #[test]
+    fn cli_cgroup_memory_max_bytes_rejects_bad_values() {
+        assert_eq!(exit_code(&["-cgroup-memory-max-bytes", "0"]), Some(2));
+        assert_eq!(exit_code(&["-cgroup-memory-max-bytes=0"]), Some(2));
+        assert_eq!(exit_code(&["-cgroup-memory-max-bytes", "abc"]), Some(2));
+        assert_eq!(exit_code(&["-cgroup-memory-max-bytes="]), Some(2));
+        // Go swallows the next token unconditionally, so a negative number is
+        // a bad value rather than a missing value or a new flag.
+        assert_eq!(exit_code(&["-cgroup-memory-max-bytes", "-1"]), Some(2));
+        assert_eq!(exit_code(&["-cgroup-memory-max-bytes", "1.5"]), Some(2));
+        // Out of u64 range is a bad value too, never a wrapped cap.
+        assert_eq!(
+            exit_code(&["-cgroup-memory-max-bytes", "18446744073709551616"]),
+            Some(2)
+        );
     }
 
     /// Flag names are matched exactly, like Go's `flag` — no abbreviation and
