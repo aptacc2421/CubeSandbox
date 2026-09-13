@@ -11,8 +11,8 @@
 //! ```text
 //! read -> pooled buffer -> bounded channel -> socket
 //!           ^ one producer task per body, three shapes:
-//!             1. blocking producer, 1 MiB slices + read-ahead, <= pool/4 bodies
-//!                (one pool thread each: the fast shape)
+//!             1. blocking producer, body-sized slices + read-ahead, <= pool/4
+//!                bodies (one pool thread each: the fast shape)
 //!             2. async producer, same slices, <= pool/2 bodies in total
 //!             3. async producer, 256 KiB slices, no read-ahead (the rest)
 //! ```
@@ -29,6 +29,13 @@
 //! syscalls per 32 MiB body against 1102 before the pool), and 256 KiB is what
 //! the unbuffered shape streams in so a storm of stalled downloads cannot grow
 //! memory with the connection count (~1.3 MiB per body instead of ~5 MiB).
+//!
+//! The chunk is a ceiling, not a constant: [`chunk_for`] scales it down with the
+//! body, because a pool holds its buffers per *body* — a fixed 1 MiB slice made
+//! every connection carry ~4 MiB of buffers no matter how little it sent, which
+//! thirty-two concurrent 4 MiB downloads turned into 211 -> 224 MiB of peak RSS
+//! (against 21 MiB for the old 64 KiB reader and 15.7 MiB for Go) with no
+//! throughput to show for it.
 
 /// Read size for a buffered body (see the module doc for the measurements).
 pub(super) const DOWNLOAD_CHUNK: usize = 1024 * 1024;
@@ -39,6 +46,22 @@ pub(super) const DOWNLOAD_READ_AHEAD: usize = 2;
 
 /// Slice size for the unbuffered shape.
 pub(super) const DOWNLOAD_STREAM_SLICE: usize = 256 * 1024;
+
+/// Read size for one body: a sixteenth of its length, clamped to
+/// [`DOWNLOAD_STREAM_SLICE`]..[`DOWNLOAD_CHUNK`].
+///
+/// The pool keeps `READ_AHEAD + 2` buffers per body, so a fixed 1 MiB chunk
+/// costs every connection ~4 MiB of buffer capacity whatever it is sending.
+/// Sizing the chunk to the body keeps that footprint proportional to the body
+/// (1 MiB of buffers for a 4 MiB file) and still gives large bodies the full
+/// chunk, where the syscall measurements say it pays. A `None` limit (a body of
+/// unknown length) has nothing to scale by and keeps the ceiling.
+pub(super) fn chunk_for(limit: Option<u64>) -> usize {
+    match limit {
+        Some(n) => ((n / 16) as usize).clamp(DOWNLOAD_STREAM_SLICE, DOWNLOAD_CHUNK),
+        None => DOWNLOAD_CHUNK,
+    }
+}
 
 /// A read buffer that recycles itself into its pool once the last `Bytes`
 /// slice of it is dropped.
@@ -250,10 +273,8 @@ pub(super) async fn reader_stream_with(
             return tokio_stream::wrappers::ReceiverStream::new(rx).boxed();
         }
     };
-    let pool = ReadPool::new(match limit {
-        Some(n) => (n as usize).min(DOWNLOAD_CHUNK),
-        None => DOWNLOAD_CHUNK,
-    });
+    let chunk = chunk_for(limit);
+    let pool = ReadPool::new(chunk);
     let (tx, rx) = tokio::sync::mpsc::channel(DOWNLOAD_READ_AHEAD);
     match budgets.blocking.try_acquire_owned() {
         Ok(blocking) => {
@@ -266,7 +287,7 @@ pub(super) async fn reader_stream_with(
                 _buffered: Some(buffered),
             };
             tokio::task::spawn_blocking(move || {
-                read_ahead_blocking(std_file, limit, pool, tx, DOWNLOAD_CHUNK, guard)
+                read_ahead_blocking(std_file, limit, pool, tx, chunk, guard)
             });
         }
         Err(_) => {
@@ -275,7 +296,7 @@ pub(super) async fn reader_stream_with(
                 _blocking: None,
                 _buffered: Some(buffered),
             };
-            tokio::spawn(read_ahead(file, limit, pool, tx, DOWNLOAD_CHUNK, guard));
+            tokio::spawn(read_ahead(file, limit, pool, tx, chunk, guard));
         }
     }
     tokio_stream::wrappers::ReceiverStream::new(rx).boxed()

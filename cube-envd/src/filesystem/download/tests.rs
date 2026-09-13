@@ -72,7 +72,8 @@ async fn a_body_that_fits_in_one_chunk_is_one_read() {
 
 /// The chunking is the point of `DOWNLOAD_CHUNK` and is invisible to any
 /// content assertion, so pin it: a regression to smaller reads would still
-/// pass every correctness test and only show up as sandbox throughput.
+/// pass every correctness test and only show up as sandbox throughput. One body
+/// above the floor and one at the ceiling.
 #[tokio::test]
 async fn a_large_body_reads_in_chunks_and_stops_at_the_limit() {
     let dir = tempfile::tempdir().unwrap();
@@ -80,17 +81,37 @@ async fn a_large_body_reads_in_chunks_and_stops_at_the_limit() {
     let size = DOWNLOAD_CHUNK + 4096;
     write_pattern(&path, size);
 
-    // One full chunk plus the tail, in order.
+    // Full chunks in order, then the tail.
+    let chunk = chunk_for(Some(size as u64));
+    let mut want = vec![chunk; size / chunk];
+    if size % chunk != 0 {
+        want.push(size % chunk);
+    }
     let file = tokio::fs::File::open(&path).await.unwrap();
     let chunks = collect(file, Some(size as u64)).await;
     let lens: Vec<usize> = chunks.iter().map(|c| c.as_ref().unwrap().len()).collect();
-    assert_eq!(lens, vec![DOWNLOAD_CHUNK, 4096]);
+    assert_eq!(lens, want);
     let all: Vec<u8> = chunks
         .into_iter()
         .flat_map(|c| c.unwrap().to_vec())
         .collect();
     assert_eq!(all.len(), size);
     assert!(all.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8));
+
+    // A body long enough to hit the ceiling still reads a whole chunk at a time.
+    let big = 16 * 1024 * 1024 + 4096;
+    let big_path = dir.path().join("bigger.bin");
+    write_pattern(&big_path, big);
+    assert_eq!(chunk_for(Some(big as u64)), DOWNLOAD_CHUNK);
+    let file = tokio::fs::File::open(&big_path).await.unwrap();
+    let lens: Vec<usize> = collect(file, Some(big as u64))
+        .await
+        .iter()
+        .map(|c| c.as_ref().unwrap().len())
+        .collect();
+    assert_eq!(lens.len(), big / DOWNLOAD_CHUNK + 1);
+    assert_eq!(lens[lens.len() - 1], 4096);
+    assert!(lens[..lens.len() - 1].iter().all(|n| *n == DOWNLOAD_CHUNK));
 
     // A limit inside the first chunk is a single read (206 with a short
     // range).
@@ -394,4 +415,53 @@ async fn the_unbuffered_tier_streams_the_same_bytes() {
     let small = collect_unbuffered(file, Some(DOWNLOAD_CHUNK as u64)).await;
     assert_eq!(small.len(), 1);
     assert_eq!(total(&small), DOWNLOAD_CHUNK);
+}
+
+/// The chunk is the *ceiling* of the read size, not the read size: a body only a
+/// few chunks long must not make its connection hold four 1 MiB buffers (the
+/// 32 x 4 MiB RSS/tail regression found in review).
+#[test]
+fn the_buffered_chunk_scales_with_the_body() {
+    assert_eq!(
+        chunk_for(None),
+        DOWNLOAD_CHUNK,
+        "unknown length keeps 1 MiB"
+    );
+    assert_eq!(chunk_for(Some(4 << 20)), DOWNLOAD_STREAM_SLICE);
+    assert_eq!(chunk_for(Some(8 << 20)), 512 * 1024);
+    assert_eq!(chunk_for(Some(16 << 20)), DOWNLOAD_CHUNK);
+    assert_eq!(chunk_for(Some(200 << 20)), DOWNLOAD_CHUNK);
+    // Anything smaller than the floor is the floor, down to one byte.
+    for n in [1, 4096, 1 << 20, 3 << 20] {
+        assert_eq!(chunk_for(Some(n)), DOWNLOAD_STREAM_SLICE, "n = {n}");
+    }
+    assert!(chunk_for(Some(15 << 20)) <= DOWNLOAD_CHUNK);
+}
+
+/// A mid-size body takes the buffered shape but with body-sized buffers, and
+/// the bytes are byte-for-byte what the fixed-chunk shape produced.
+#[tokio::test]
+async fn a_mid_size_body_buffers_with_body_sized_buffers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mid.bin");
+    let size = 4 << 20;
+    assert!(size > DOWNLOAD_CHUNK, "must be too long for a single read");
+    write_pattern(&path, size);
+
+    let file = tokio::fs::File::open(&path).await.unwrap();
+    let chunks = collect(file, Some(size as u64)).await;
+    assert!(
+        chunks.len() >= 16,
+        "a 4 MiB body reads in 256 KiB slices, got {}",
+        chunks.len()
+    );
+    assert!(chunks
+        .iter()
+        .all(|c| c.as_ref().unwrap().len() <= DOWNLOAD_STREAM_SLICE));
+    let all: Vec<u8> = chunks
+        .into_iter()
+        .flat_map(|c| c.unwrap().to_vec())
+        .collect();
+    assert_eq!(all.len(), size);
+    assert!(all.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8));
 }
