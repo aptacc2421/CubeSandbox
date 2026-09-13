@@ -20,7 +20,7 @@ mod protocol;
 
 use std::sync::Arc;
 
-use app::cli::{parse_cli, COMMIT, VERSION};
+use app::cli::{parse_cli, COMMIT, IMPL_VERSION, VERSION};
 use app::routes;
 
 fn main() {
@@ -64,7 +64,12 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        tracing::info!("cube-envd {VERSION} ({COMMIT}) listening on {addr}");
+        // `app::serve::serve` is this branch's accept loop (it asks for
+        // `half_close(true)` and `TCP_NODELAY`); the merged base only renamed
+        // the log line, which upstream reports with the emulated version.
+        tracing::info!(
+            "cube-envd {VERSION} (compat; impl {IMPL_VERSION}, commit {COMMIT}) listening on {addr}"
+        );
         if let Err(e) = app::serve::serve(listener, app).await {
             tracing::error!("server error: {e}");
             std::process::exit(1);

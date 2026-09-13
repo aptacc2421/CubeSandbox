@@ -118,6 +118,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "mime",
  "multer",
  "serde",
  "serde_json",
