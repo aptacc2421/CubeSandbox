@@ -178,9 +178,16 @@ Environment variables:
 | Variable           | Default             | Purpose                                              |
 | ------------------ | ------------------- | ---------------------------------------------------- |
 | `ENVD_PORT`        | `49983`             | Port `envd` listens on.                              |
-| `ENVD_EXTRA_ARGS`  | *(empty)*           | Extra flags passed after `-port`. `-isnotfc` is appended automatically if not already present, to skip Firecracker MMDS lookup. Only flags cube-envd declares are accepted — anything else (including a typo) makes envd exit 2 at startup instead of silently running on defaults. `-cmd` and `-cgroup-root` are recognized but not implemented yet: they are warned about and skipped. |
+| `ENVD_EXTRA_ARGS`  | *(empty)*           | Extra flags passed after `-port`. `-isnotfc` is appended automatically if not already present, to skip Firecracker MMDS lookup. Only flags cube-envd declares are accepted — anything else (including a typo) makes envd exit 2 at startup instead of silently running on defaults. `-cgroup-memory-max-bytes` is a cube-envd extension that sets the cgroup v2 `user`/`ptys` memory cap in bytes (it wins over `CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES`, and a zero or malformed value is a usage error); `-cmd` and `-cgroup-root` are recognized but not implemented yet: they are warned about and skipped. |
 | `ENVD_LOG_FILE`    | `/var/log/envd.log` | File that captures envd stdout/stderr. Use `-` to inherit the container stdio. |
 | `ENVD_BIN`         | `/usr/bin/envd`     | Override if you install envd elsewhere.              |
+
+One more knob is read from envd's own environment rather than passed as a flag:
+`CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES` (the memory budget envd manages, in bytes).
+The `-cgroup-memory-max-bytes` flag above sets the same thing and wins over it,
+so a deployment that only controls `ENVD_EXTRA_ARGS` can set the cap with e.g.
+`ENVD_EXTRA_ARGS="-cgroup-memory-max-bytes 268435456"` (256 MiB).
+`cube-envd/README.md` documents the full list.
 
 ### Starting envd manually
 

@@ -120,7 +120,7 @@ Implemented (behavior matched fixture-by-fixture against the baseline):
 | REST | `GET /health` (204), `POST /init` (envVars merge + optional accessToken), `GET /envs`, `GET /metrics`, `GET/POST /files` (octet-stream + multipart, relative paths, ownership, error vocabulary) |
 | `process.Process` | `Start` (Connect JSON streaming: start/data/end events; optional pipe stdin defaults on; `pty` allocates a real pty with merged `data.pty` output, CRLF line discipline and initial window size; `cwd` validation and privilege drop; whole-group deadline cleanup; a client disconnect leaves the child running), `Connect` (attach by pid/tag from the current output head), `List`, `SendSignal`, `SendInput`, `StreamInput`, `CloseStdin` and `Update` |
 | `filesystem.Filesystem` | `Stat`, `ListDir` (depth-limited; lexical, depth-first `filepath.WalkDir` order), `MakeDir` (ownership on every created component), `Move`, `Remove` (idempotent), `WatchDir` (Connect server streaming: `start`/`keepalive`/`filesystem` events; fsnotify-faithful op mapping with the fixed expansion order; per-directory inotify watches with optional full recursion incl. synthetic creates for pre-existing subtrees and cookie-paired rename path rewrites), `CreateWatcher` / `GetWatcherEvents` / `RemoveWatcher` (pull watchers with id lifecycle) |
-| CLI | Go `flag` compatible: `-port` (u16, `-port N` or `-port=N`), `-isnotfc` (accepted and ignored; `-isnotfc=false` is **rejected** — only the non-FC mode is implemented), `-version`/`--version`, `-commit`, `-h`/`-help` (usage, exit 0); `-cmd`/`-cgroup-root` are recognized but not implemented yet (warned and skipped); **any other flag or positional argument is a usage error — Go's message + usage on stderr + exit 2** |
+| CLI | Go `flag` compatible: `-port` (u16, `-port N` or `-port=N`), `-isnotfc` (accepted and ignored; `-isnotfc=false` is **rejected** — only the non-FC mode is implemented), `-version`/`--version`, `-commit`, `-h`/`-help` (usage, exit 0); `-cgroup-memory-max-bytes` (cube-envd extension — upstream has no equivalent — and the flag form of `CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES`, which it wins over: the cgroup v2 `user`/`ptys` memory cap in bytes, with a zero or malformed value rejected as a usage error); `-cmd`/`-cgroup-root` are recognized but not implemented yet (warned and skipped); **any other flag or positional argument is a usage error — Go's message + usage on stderr + exit 2** |
 | Auth | `Authorization: Basic base64("<user>:")` / `username` query, `/etc/passwd` resolution, default user `root`, privilege drop per operation, `X-Access-Token` enforced only after /init provides one |
 
 Out of scope — these return stable, protocol-correct `unimplemented`
@@ -315,7 +315,10 @@ Configuration:
   daemon membership is resolved when visible below that root.
 - `CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES`: positive requested memory cap, clamped
   by the safe guest/enclosing-parent limit. Without it, the budget reserves
-  `min(total/8, 128 MiB)` from the effective guest/parent memory ceiling.
+  `min(total/8, 128 MiB)` from the effective guest/parent memory ceiling. The
+  cube-envd `-cgroup-memory-max-bytes` flag sets the same thing and wins over
+  it, so the cap can be injected on the command line (see `ENVD_EXTRA_ARGS` in
+  the bring-your-own-image tutorial) instead of envd's own environment.
 
 A Start timeout kills the command, publishes the real EndEvent, then emits a
 `deadline_exceeded` trailer. `Connect-Timeout-Ms` bounds the attachment, not

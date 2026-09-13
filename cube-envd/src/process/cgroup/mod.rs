@@ -314,8 +314,29 @@ pub(crate) fn read_mem_total_kib(path: &Path) -> std::io::Result<u64> {
 /// failure log the reason and fall back to `NoopManager`. All-or-nothing:
 /// a partially built subtree set is dropped inside `new` and never kept.
 /// `main.rs` calls this exactly once; the choice is then fixed.
-pub fn init() -> Arc<dyn Manager> {
-    let configured = match std::env::var(MEMORY_MAX_ENV) {
+///
+/// `memory_max_override` is cube-envd's `-cgroup-memory-max-bytes`, the flag
+/// form of `CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES`; the flag wins over the
+/// environment form. Both feed the same slot, so the clamp against the
+/// guest/enclosing-parent ceiling below applies to either.
+pub fn init(memory_max_override: Option<u64>) -> Arc<dyn Manager> {
+    let configured = resolve_memory_max(memory_max_override, std::env::var(MEMORY_MAX_ENV));
+    let root = std::env::var_os(CGROUP_ROOT_ENV)
+        .filter(|value| !value.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup"));
+    init_at(&root, Path::new("/proc/meminfo"), configured)
+}
+
+/// Memory-cap precedence: the flag, then the environment, then the derived
+/// guest/enclosing-parent ceiling. A malformed environment value is reported
+/// and treated as unset, because a deployment that sets it badly must still
+/// start; an invalid flag never reaches here — the CLI parser rejects it.
+fn resolve_memory_max(flag: Option<u64>, env: Result<String, std::env::VarError>) -> Option<u64> {
+    if flag.is_some() {
+        return flag;
+    }
+    match env {
         Ok(raw) => match raw.parse::<u64>() {
             Ok(0) | Err(_) => {
                 tracing::warn!(
@@ -330,12 +351,7 @@ pub fn init() -> Arc<dyn Manager> {
             tracing::warn!("cgroup: cannot read {MEMORY_MAX_ENV}: {e}");
             None
         }
-    };
-    let root = std::env::var_os(CGROUP_ROOT_ENV)
-        .filter(|value| !value.as_os_str().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup"));
-    init_at(&root, Path::new("/proc/meminfo"), configured)
+    }
 }
 
 fn init_at(root: &Path, meminfo: &Path, configured: Option<u64>) -> Arc<dyn Manager> {
@@ -380,7 +396,7 @@ fn init_at(root: &Path, meminfo: &Path, configured: Option<u64>) -> Arc<dyn Mana
     match Cgroup2Manager::new(&manager_root, &types) {
         Ok(mgr) => {
             tracing::info!(
-                "cgroup: mode=enabled v2 user/ptys subtrees under {} (memory.high=max={memory_max}, guest_bytes={guest_bytes}, parent_limit={parent_limit:?})",
+                "cgroup: mode=enabled v2 user/ptys subtrees under {} (memory.high=max={memory_max}, requested={configured:?}, guest_bytes={guest_bytes}, parent_limit={parent_limit:?})",
                 manager_root.display()
             );
             Arc::new(mgr)
@@ -515,6 +531,7 @@ fn subtree(dir: &str, memory_max: u64, cpu_weight: &str) -> CgroupConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
     #[test]
     fn compute_limits_keeps_1_8_or_128mib() {
@@ -531,6 +548,35 @@ mod tests {
         assert_eq!(
             compute_limits(five_twelve_mib_kib),
             five_twelve_mib_bytes - five_twelve_mib_bytes / 8
+        );
+    }
+
+    /// The memory cap follows the flag-over-environment order: a deployment that
+    /// sets both gets the flag, and a malformed environment value is ignored
+    /// rather than fatal.
+    #[test]
+    fn resolve_memory_max_prefers_the_flag_then_the_environment() {
+        let bytes = |value: &str| Ok(value.to_string());
+        assert_eq!(resolve_memory_max(Some(1024), bytes("2048")), Some(1024));
+        assert_eq!(resolve_memory_max(None, bytes("2048")), Some(2048));
+        assert_eq!(resolve_memory_max(Some(1024), bytes("bogus")), Some(1024));
+        assert_eq!(resolve_memory_max(None, bytes("0")), None);
+        assert_eq!(resolve_memory_max(None, bytes("bogus")), None);
+        assert_eq!(resolve_memory_max(None, bytes("-1")), None);
+        assert_eq!(
+            resolve_memory_max(None, Err(std::env::VarError::NotPresent)),
+            None
+        );
+        assert_eq!(
+            resolve_memory_max(
+                None,
+                Err(std::env::VarError::NotUnicode(OsString::from("x")))
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_memory_max(Some(1024), Err(std::env::VarError::NotPresent)),
+            Some(1024)
         );
     }
 
