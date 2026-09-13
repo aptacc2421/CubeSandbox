@@ -33,6 +33,17 @@ import sys
 import tempfile
 import time
 
+# `tracing-subscriber` colorises its output when built with its `ansi` feature
+# (the deployed 0.1.0 build is; this crate's does not), which puts escape
+# sequences *inside* the field names — `blocking_threads\x1b[0m\x1b[2m=\x1b[0m8`.
+# Matching the raw text then fails for a perfectly healthy daemon, so strip CSI
+# sequences and collapse whitespace before looking for the values.
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def plain(text):
+    return " ".join(ANSI.sub("", text).split())
+
 TOKEN = "localtok"
 BIG_BODY = 8 * 1024 * 1024  # far above DOWNLOAD_CHUNK, so it takes a global slot
 SMALL_BODY = 4096  # fits in one chunk: exempt from the cap
@@ -69,7 +80,28 @@ def status_of(port, path, timeout=5.0):
         connection.close()
 
 
+def selftest():
+    """The matcher must survive a colorised log line (see ANSI/plain)."""
+    colorised = (
+        "2026-09-13T11:15:18Z  INFO runtime limits "
+        "\x1b[3mblocking_threads\x1b[0m\x1b[2m=\x1b[0m\x1b[2m8\x1b[0m "
+        "\x1b[3mdownload_blocking_producers\x1b[0m\x1b[2m=\x1b[0m\x1b[2m2\x1b[0m "
+        "\x1b[3mdownload_buffered_bodies\x1b[0m\x1b[2m=\x1b[0m\x1b[2m4\x1b[0m "
+        "\x1b[3mdownload_max_bodies\x1b[0m\x1b[2m=\x1b[0m\x1b[2m6\x1b[0m"
+    )
+    wanted = (
+        f"blocking_threads={POOL_FLAG} download_blocking_producers=2 "
+        f"download_buffered_bodies=4 download_max_bodies={CAP}"
+    )
+    assert wanted not in colorised, "the raw match must fail on colour, or this test is pointless"
+    assert wanted in plain(colorised), "the stripped match must succeed"
+    print("selftest: ANSI stripping works")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
+        selftest()
+        return
     binary = Path(
         sys.argv[1]
         if len(sys.argv) > 1
@@ -135,11 +167,12 @@ def main():
                 f"blocking_threads={POOL_FLAG} download_blocking_producers=2 "
                 f"download_buffered_bodies=4 download_max_bodies={CAP}"
             )
-            line = next((ln for ln in limits.splitlines() if "runtime limits" in ln), limits[-200:])
+            text = plain(limits)
+            line = next((ln for ln in limits.splitlines() if "runtime limits" in plain(ln)), limits[-200:])
             check(
                 "ENVD_EXTRA_ARGS reaches envd, and the flag beats the environment",
-                wanted in limits,
-                line.strip(),
+                wanted in text,
+                plain(line),
             )
 
             # The cap, behaviourally: CAP bodies in flight, the next one refused.
