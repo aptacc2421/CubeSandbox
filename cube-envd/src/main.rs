@@ -20,7 +20,7 @@ mod protocol;
 
 use std::sync::Arc;
 
-use app::cli::{parse_cli, COMMIT, VERSION};
+use app::cli::{parse_cli, COMMIT, IMPL_VERSION, VERSION};
 use app::routes;
 
 fn main() {
@@ -76,7 +76,9 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        tracing::info!("cube-envd {VERSION} ({COMMIT}) listening on {addr}");
+        tracing::info!(
+            "cube-envd {VERSION} (compat; impl {IMPL_VERSION}, commit {COMMIT}) listening on {addr}"
+        );
         // Nagle is on by default and costs a full delayed-ACK round trip on
         // any response whose head and body leave as separate small writes:
         // a 4 KiB `/files` download measured 44 ms against 1.6 ms for 1 MiB,
