@@ -433,6 +433,24 @@ async fn the_unbuffered_tier_streams_the_same_bytes() {
     assert_eq!(total(&small), DOWNLOAD_CHUNK);
 }
 
+/// The pool's budget is derived from the same knob as the body budgets, so the
+/// two cannot drift apart; the constant the platform layer divides by must be
+/// the chunk this layer actually reads in.
+#[test]
+fn the_pool_budget_matches_the_body_budget_and_the_chunk() {
+    let buffered = crate::platform::limits::download_buffered_bodies();
+    assert_eq!(
+        crate::platform::limits::download_pool_bytes(),
+        buffered * DOWNLOAD_CHUNK,
+        "one buffer per buffered body"
+    );
+    assert_eq!(
+        DOWNLOAD_CHUNK,
+        1024 * 1024,
+        "the platform layer's DOWNLOAD_POOL_CHUNK assumes 1 MiB"
+    );
+}
+
 /// The chunk is the *ceiling* of the read size, not the read size: a body only a
 /// few chunks long must not make its connection hold four 1 MiB buffers (the
 /// 32 x 4 MiB RSS/tail regression found in review).

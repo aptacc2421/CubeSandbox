@@ -82,16 +82,18 @@ impl Drop for PooledBuffer {
     }
 }
 
-/// How much recycled buffer memory the process-wide pool may hold.
+/// The pool's byte budget comes from the configured budgets — one read buffer
+/// per buffered body, `platform::limits::download_pool_bytes()` — not from a
+/// constant here: 4 MiB at `-blocking-threads 8`, 32 MiB at the default pool and
+/// never more than that, so the cache follows configuration downwards and stays
+/// bounded upwards.
 ///
 /// The pool is what keeps a body from faulting in fresh pages: measured in a
 /// 2 vCPU guest at 32 concurrent 4 MiB downloads, allocating per body cost
 /// **73.6 minor faults per MiB** against 4.7 for a reader that reuses one
-/// buffer for the whole body and 0.1 for Go's `sendfile`. 32 MiB is the
-/// default budget's own working set (32 buffered bodies x 1 MiB), so the pool
-/// recycles that set instead of becoming a memory policy of its own.
-pub(super) const DOWNLOAD_POOL_BYTES: usize = 32 * 1024 * 1024;
-
+/// buffer for the whole body and 0.1 for Go's `sendfile`, at roughly 25 us of
+/// daemon CPU per fault.
+///
 /// Recycled read buffers. A fresh allocation per read costs an `mmap`, a
 /// `munmap` and a page-faulting zero-fill of the whole chunk — under musl that
 /// was 278 syscalls per 32 MiB download (142 `mmap` + 136 `munmap`), a quarter
@@ -185,7 +187,7 @@ impl ReadPool {
 /// The process-wide pool every body recycles through.
 pub(super) fn pool() -> ReadPool {
     static POOL: std::sync::OnceLock<ReadPool> = std::sync::OnceLock::new();
-    POOL.get_or_init(|| ReadPool::new(DOWNLOAD_POOL_BYTES))
+    POOL.get_or_init(|| ReadPool::new(crate::platform::limits::download_pool_bytes()))
         .clone()
 }
 

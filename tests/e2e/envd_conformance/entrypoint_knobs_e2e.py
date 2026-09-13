@@ -87,11 +87,15 @@ def selftest():
         "\x1b[3mblocking_threads\x1b[0m\x1b[2m=\x1b[0m\x1b[2m8\x1b[0m "
         "\x1b[3mdownload_blocking_producers\x1b[0m\x1b[2m=\x1b[0m\x1b[2m2\x1b[0m "
         "\x1b[3mdownload_buffered_bodies\x1b[0m\x1b[2m=\x1b[0m\x1b[2m4\x1b[0m "
-        "\x1b[3mdownload_max_bodies\x1b[0m\x1b[2m=\x1b[0m\x1b[2m6\x1b[0m"
+        "\x1b[3mdownload_max_bodies\x1b[0m\x1b[2m=\x1b[0m\x1b[2m6\x1b[0m "
+        "\x1b[3mdownload_pool_bytes\x1b[0m\x1b[2m=\x1b[0m\x1b[2m4194304\x1b[0m"
     )
     wanted = (
         f"blocking_threads={POOL_FLAG} download_blocking_producers=2 "
-        f"download_buffered_bodies=4 download_max_bodies={CAP}"
+        f"download_buffered_bodies=4 download_max_bodies={CAP} "
+        # The recycled-buffer budget follows the same knob: 4 buffered bodies
+        # x 1 MiB, not the default 32 MiB.
+        f"download_pool_bytes={4 * 1024 * 1024}"
     )
     assert wanted not in colorised, "the raw match must fail on colour, or this test is pointless"
     assert wanted in plain(colorised), "the stripped match must succeed"
@@ -165,7 +169,8 @@ def main():
                 time.sleep(0.1)
             wanted = (
                 f"blocking_threads={POOL_FLAG} download_blocking_producers=2 "
-                f"download_buffered_bodies=4 download_max_bodies={CAP}"
+                f"download_buffered_bodies=4 download_max_bodies={CAP} "
+                f"download_pool_bytes={4 * 1024 * 1024}"
             )
             text = plain(limits)
             line = next((ln for ln in limits.splitlines() if "runtime limits" in plain(ln)), limits[-200:])
