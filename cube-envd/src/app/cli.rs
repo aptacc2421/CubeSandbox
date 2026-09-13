@@ -49,6 +49,13 @@ const UNIMPLEMENTED: &[&str] = &["cmd", "cgroup-root"];
 
 pub(crate) struct Cli {
     pub(crate) port: u16,
+    /// cube-envd extensions (no upstream equivalent): the deployment knobs of
+    /// `platform/limits.rs`. They exist as flags because `ENVD_EXTRA_ARGS` is
+    /// the entrypoint's documented tuning surface and only accepts *declared*
+    /// flags; the equivalent environment variables still work and the flag wins.
+    pub(crate) blocking_threads: Option<usize>,
+    pub(crate) download_max_bodies: Option<usize>,
+
     /// cube-envd extension (no upstream equivalent): the requested cap for the
     /// cgroup v2 `user`/`ptys` subtrees. It exists as a flag because
     /// `ENVD_EXTRA_ARGS` is the entrypoint's documented tuning surface and only
@@ -72,6 +79,8 @@ type ExitCode = i32;
 /// and ignore them, which is the silent degradation this parser refuses.
 pub(crate) fn parse_cli(args: &[String]) -> Result<Cli, ExitCode> {
     let mut port = DEFAULT_PORT;
+    let mut blocking_threads = None;
+    let mut download_max_bodies = None;
     let mut cgroup_memory_max = None;
     let mut version = false;
     let mut commit = false;
@@ -149,6 +158,37 @@ pub(crate) fn parse_cli(args: &[String]) -> Result<Cli, ExitCode> {
                     ))
                 })?;
             }
+            // cube-envd extensions: the deployment knobs, so a user can set
+            // them through ENVD_EXTRA_ARGS (the entrypoint only forwards flags
+            // it can name). Validation matches the environment variables:
+            // out-of-range values are adjudicated in platform/limits.rs, but a
+            // non-number or zero is a usage error like any other bad flag value.
+            "blocking-threads" | "download-max-bodies" => {
+                let raw = match inline {
+                    Some(v) => v,
+                    None => {
+                        let (v, tail) = rest
+                            .split_first()
+                            .ok_or_else(|| fail(&format!("flag needs an argument: -{name}")))?;
+                        rest = tail;
+                        v
+                    }
+                };
+                let value = raw
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| {
+                        fail(&format!(
+                            "invalid value {raw:?} for flag -{name}: expected a positive integer"
+                        ))
+                    })?;
+                if name == "blocking-threads" {
+                    blocking_threads = Some(value);
+                } else {
+                    download_max_bodies = Some(value);
+                }
+            }
             // cube-envd extension: the memory cap of the cgroup v2 user/ptys
             // subtrees, so a deployment can set it through ENVD_EXTRA_ARGS
             // (the entrypoint only forwards flags it can name). Validation
@@ -202,6 +242,8 @@ pub(crate) fn parse_cli(args: &[String]) -> Result<Cli, ExitCode> {
     }
     Ok(Cli {
         port,
+        blocking_threads,
+        download_max_bodies,
         cgroup_memory_max,
     })
 }
@@ -244,6 +286,13 @@ fn print_usage() {
         "Usage of cube-envd:
   -port uint
         port on which the daemon should run (default {DEFAULT_PORT})
+  -blocking-threads uint
+        blocking-pool thread cap (cube-envd extension; default 64, clamped to
+        4..=256; the same as CUBE_ENVD_BLOCKING_THREADS, and this flag wins)
+  -download-max-bodies uint
+        global cap on concurrent large /files downloads (cube-envd extension;
+        default twice the pool, never below the pipeline's own concurrency;
+        the same as CUBE_ENVD_DOWNLOAD_MAX_BODIES, and this flag wins)
   -isnotfc
         accepted and ignored (compatibility with upstream envd); only the
         non-FC mode is implemented, so -isnotfc=false is rejected
@@ -276,6 +325,28 @@ mod tests {
 
     fn exit_code(items: &[&str]) -> Option<ExitCode> {
         parse_cli(&args(items)).err()
+    }
+
+    fn knobs(items: &[&str]) -> Result<(Option<usize>, Option<usize>), ExitCode> {
+        parse_cli(&args(items)).map(|c| (c.blocking_threads, c.download_max_bodies))
+    }
+
+    /// The deployment knobs are reachable as flags, because that is the
+    /// entrypoint's documented tuning surface (ENVD_EXTRA_ARGS forwards flags,
+    /// and only declared ones). Both flag spellings work, and a bad value is a
+    /// usage error rather than a silent default.
+    #[test]
+    fn cli_deployment_knobs() {
+        assert_eq!(knobs(&[]), Ok((None, None)));
+        assert_eq!(knobs(&["-blocking-threads", "8"]), Ok((Some(8), None)));
+        assert_eq!(knobs(&["-blocking-threads=8"]), Ok((Some(8), None)));
+        assert_eq!(
+            knobs(&["-download-max-bodies", "256", "-blocking-threads", "16"]),
+            Ok((Some(16), Some(256)))
+        );
+        assert_eq!(exit_code(&["-blocking-threads", "0"]), Some(2));
+        assert_eq!(exit_code(&["-blocking-threads", "many"]), Some(2));
+        assert_eq!(exit_code(&["-download-max-bodies"]), Some(2));
     }
 
     #[test]
