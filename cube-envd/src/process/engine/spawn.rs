@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::{oneshot, watch, Notify};
 
-use crate::process::OutputBus;
+use crate::process::{AttachmentClaim, OutputBus};
 
 use crate::platform::config::Config;
 use crate::platform::identity::User;
@@ -261,6 +261,16 @@ enum Streams {
 /// This closes the fast-exit race where an OOM/termination event could otherwise
 /// be decorated before the process service stores its leaf.
 pub fn spawn(req: Spawn<'_>) -> std::io::Result<SpawnedProcess> {
+    // The process-wide attachment budget is claimed before anything at all is
+    // created: a command whose first stream could never be attached has to be
+    // refused, not spawned and then killed. The claim is released if this
+    // function returns early, and the bus below takes it over on success.
+    let claim = AttachmentClaim::claim().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "too many concurrent output attachments",
+        )
+    })?;
     // Stdio first: a pty pair is opened and its master registered before any
     // child exists, so a registration failure cannot strand one.
     let (child_stdio, slave, pty) = match req.pty {
@@ -354,7 +364,7 @@ pub fn spawn(req: Spawn<'_>) -> std::io::Result<SpawnedProcess> {
     // progress for the eviction window is disconnected on its own.
     // `initial` is created *before* the pump task so the first subscription
     // never misses an early event.
-    let (bus, mut initial) = OutputBus::new();
+    let (bus, mut initial) = OutputBus::new_claimed(claim);
     // A clone kept for `Connect` to attach later subscribers; the pump task
     // moves `bus` itself below.
     let sender = Arc::clone(&bus);
@@ -697,6 +707,85 @@ mod tests {
             after <= before + LEAK_TOLERANCE,
             "64 spawns grew the descriptor table from {before} to {after}"
         );
+    }
+
+    /// The budget is claimed before the child exists, so an exhausted budget
+    /// must refuse the command *without* leaving a process behind -- and must
+    /// release the slot it could not use.
+    ///
+    /// `#[ignore]` because it fills the process-wide budget, which would fail
+    /// every other test that spawns in parallel:
+    ///   cargo test -- --ignored --test-threads=1 a_refused_command_is_not_spawned
+    #[tokio::test]
+    #[ignore = "fills the process-wide attachment budget; run with --test-threads=1"]
+    async fn a_refused_command_is_not_spawned() {
+        fn marker_processes(marker: &str) -> usize {
+            let mut found = 0;
+            for entry in std::fs::read_dir("/proc").expect("/proc").flatten() {
+                let cmdline = entry.path().join("cmdline");
+                if let Ok(bytes) = std::fs::read(&cmdline) {
+                    if String::from_utf8_lossy(&bytes).contains(marker) {
+                        found += 1;
+                    }
+                }
+            }
+            found
+        }
+
+        // Hold every slot in the process-wide budget.
+        let mut held = Vec::new();
+        while let Ok(claim) = AttachmentClaim::claim() {
+            held.push(claim);
+        }
+        assert_eq!(
+            held.len(),
+            crate::process::bus_global_limit_for_tests(),
+            "the claim loop should stop exactly at the ceiling"
+        );
+
+        let marker = "cube-envd-refused-marker";
+        let user = current_user();
+        let env = HashMap::from([("PATH".to_string(), DEFAULT_PATH.to_string())]);
+        let refused = spawn(Spawn {
+            cmd: "/bin/sh",
+            args: &["-c".into(), format!("sleep 30 # {marker}")],
+            env: env.clone(),
+            cwd: "/".into(),
+            user: &user,
+            stdin: false,
+            pty: None,
+            cgroup_fd: None,
+            process_cgroup: None,
+        })
+        .expect_err("an exhausted budget must refuse the command");
+        assert_eq!(
+            refused.kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the refusal has to be recognizable to the Start handler: {refused}"
+        );
+        // Nothing was created, so nothing has to be cleaned up.
+        assert_eq!(marker_processes(marker), 0, "the child must not exist");
+
+        // Releasing the budget makes the same command work again.
+        drop(held);
+        let mut proc = spawn(Spawn {
+            cmd: "/bin/sh",
+            args: &["-c".into(), format!("true # {marker}")],
+            env,
+            cwd: "/".into(),
+            user: &user,
+            stdin: false,
+            pty: None,
+            cgroup_fd: None,
+            process_cgroup: None,
+        })
+        .expect("the released budget admits the command");
+        loop {
+            match proc.initial.recv().await {
+                Ok(PumpEvent::End(_)) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
     }
 
     /// The deterministic form of the same regression: a command that closes its

@@ -24,6 +24,13 @@ pub mod engine;
 pub mod table;
 pub mod wire;
 
+pub(crate) use bus::AttachmentClaim;
+
+/// The process-wide attachment ceiling, for the probe that has to fill it.
+#[cfg(test)]
+pub(crate) fn bus_global_limit_for_tests() -> usize {
+    bus::global_limit_for_tests()
+}
 pub use bus::{OutputBus, Subscription};
 pub use command::{
     close_stdin, connect, list, send_input, send_signal, start, stream_input_event, update,

@@ -162,8 +162,18 @@ pub fn start(
             }
             // A genuine spawn failure is an InvalidArgument RPC error. The
             // wrapper makes a missing user command a natural exit-127 event.
+            //
+            // `WouldBlock` is the exception: it is the exhausted attachment
+            // budget (and, for the same reason, a fork that ran out of
+            // resources), which is a transient shortage rather than a bad
+            // argument, so it reports like the per-process refusal above.
+            let code = if e.kind() == std::io::ErrorKind::WouldBlock {
+                ConnectCode::ResourceExhausted
+            } else {
+                ConnectCode::InvalidArgument
+            };
             return stream_error_response(ConnectError::new(
-                ConnectCode::InvalidArgument,
+                code,
                 format!(
                     "error starting process '{}': {e}",
                     user_command(&req.process.cmd, &req.process.args)
@@ -686,7 +696,7 @@ mod tests {
     fn list_shape() {
         let table = ProcessTable::new(Arc::new(crate::process::cgroup::NoopManager));
         assert_eq!(list(&table), serde_json::json!({}));
-        let (sender, _rx) = crate::process::OutputBus::new();
+        let (sender, _rx) = crate::process::OutputBus::new().expect("a fresh bus");
         table.insert_process(ProcEntry {
             pid: 7,
             tag: Some("t".into()),
@@ -824,7 +834,7 @@ mod tests {
             ConnectCode::NotFound
         );
         // Missing pty on a live process is a silent no-op success, not an error.
-        let (sender, _rx) = crate::process::OutputBus::new();
+        let (sender, _rx) = crate::process::OutputBus::new().expect("a fresh bus");
         table.insert_process(ProcEntry {
             pid: 7,
             tag: Some("t".into()),
@@ -854,7 +864,7 @@ mod tests {
     #[test]
     fn update_non_pty_process_is_internal() {
         let table = ProcessTable::new(Arc::new(crate::process::cgroup::NoopManager));
-        let (sender, _rx) = crate::process::OutputBus::new();
+        let (sender, _rx) = crate::process::OutputBus::new().expect("a fresh bus");
         table.insert_process(ProcEntry {
             pid: 7,
             tag: None,
@@ -1032,7 +1042,7 @@ mod tests {
 
     #[tokio::test]
     async fn connect_driver_exits_when_response_receiver_disconnects() {
-        let (_pub_tx, events) = crate::process::OutputBus::new();
+        let (_pub_tx, events) = crate::process::OutputBus::new().expect("a fresh bus");
         let (body, mut rx) = crate::process::bus::body_channel();
         let driver = tokio::spawn(drive_stream(
             42,
@@ -1151,7 +1161,7 @@ mod tests {
 
     #[tokio::test]
     async fn closed_output_bus_returns_explicit_error_frame() {
-        let (pub_tx, events) = crate::process::OutputBus::new();
+        let (pub_tx, events) = crate::process::OutputBus::new().expect("a fresh bus");
         let (body, mut rx) = crate::process::bus::body_channel();
         let driver = tokio::spawn(drive_stream(
             42,
@@ -1432,7 +1442,7 @@ mod tests {
     #[tokio::test]
     async fn a_disconnected_client_does_not_reap_a_running_process() {
         let table = ProcessTable::new(Arc::new(crate::process::cgroup::NoopManager));
-        let (pub_tx, events) = crate::process::OutputBus::new();
+        let (pub_tx, events) = crate::process::OutputBus::new().expect("a fresh bus");
         let _handle = table.insert_process(ProcEntry {
             pid: 42,
             tag: None,
@@ -1479,7 +1489,7 @@ mod tests {
 
     #[tokio::test]
     async fn end_event_and_end_stream_share_one_queue_slot() {
-        let (pub_tx, events) = crate::process::OutputBus::new();
+        let (pub_tx, events) = crate::process::OutputBus::new().expect("a fresh bus");
         let (body, mut rx) = crate::process::bus::body_channel();
         let driver = tokio::spawn(drive_stream(
             42,
@@ -1521,7 +1531,7 @@ mod tests {
     #[tokio::test]
     async fn stream_input_requires_start_and_reuses_selected_writer() {
         let table = ProcessTable::new(Arc::new(crate::process::cgroup::NoopManager));
-        let (sender, _events) = crate::process::OutputBus::new();
+        let (sender, _events) = crate::process::OutputBus::new().expect("a fresh bus");
         table.insert_process(ProcEntry {
             pid: 7,
             tag: Some("shell".into()),
@@ -1568,7 +1578,7 @@ mod tests {
     #[tokio::test]
     async fn input_oneof_validation_reports_unimplemented() {
         let table = ProcessTable::new(Arc::new(crate::process::cgroup::NoopManager));
-        let (sender, _events) = crate::process::OutputBus::new();
+        let (sender, _events) = crate::process::OutputBus::new().expect("a fresh bus");
         let pid = table.insert_process(ProcEntry {
             pid: 8,
             tag: None,
@@ -1608,7 +1618,8 @@ mod tests {
         // window: the publisher must *wait* for this slow reader. Dropping or
         // evicting it here would be the truncation this work removes.
         let (pub_tx, events) =
-            crate::process::OutputBus::with_limits(2, std::time::Duration::from_secs(60), 8);
+            crate::process::OutputBus::with_limits(2, std::time::Duration::from_secs(60), 8)
+                .expect("a fresh bus");
         let (body, mut rx) = crate::process::bus::body_channel();
         let driver = tokio::spawn(drive_stream(
             42,
@@ -1666,7 +1677,8 @@ mod tests {
         // and the client never reading, the publisher wedges, so the connection
         // must be evicted and say so on the wire instead of stalling forever.
         let (pub_tx, events) =
-            crate::process::OutputBus::with_limits(2, std::time::Duration::from_millis(60), 8);
+            crate::process::OutputBus::with_limits(2, std::time::Duration::from_millis(60), 8)
+                .expect("a fresh bus");
         let (body, mut rx) = crate::process::bus::body_channel();
         let driver = tokio::spawn(drive_stream(
             42,
@@ -1711,7 +1723,7 @@ mod tests {
     async fn a_connection_deadline_fires_while_the_client_is_behind() {
         // The writer is waiting for a data slot (the client is not reading), so
         // the deadline must still fire: it is polled before the data arm.
-        let (pub_tx, events) = crate::process::OutputBus::new();
+        let (pub_tx, events) = crate::process::OutputBus::new().expect("a fresh bus");
         let (body, mut rx) = crate::process::bus::body_channel();
         let driver = tokio::spawn(drive_stream(
             42,

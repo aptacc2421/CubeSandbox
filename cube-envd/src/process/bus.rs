@@ -52,6 +52,12 @@ pub(crate) const MAX_SUBSCRIBERS_PER_PROCESS: usize = 8;
 /// Attachments allowed in this envd process, across all processes.
 pub(crate) const MAX_SUBSCRIBERS_GLOBAL: usize = 64;
 
+/// The production ceiling, for the probe test in `engine::spawn`.
+#[cfg(test)]
+pub(crate) fn global_limit_for_tests() -> usize {
+    MAX_SUBSCRIBERS_GLOBAL
+}
+
 static GLOBAL_SUBSCRIBERS: AtomicUsize = AtomicUsize::new(0);
 
 /// Why a subscription stopped receiving events.
@@ -211,6 +217,52 @@ impl Drop for Subscription {
     }
 }
 
+/// One attachment slot reserved from the process-wide budget.
+///
+/// `spawn` takes one *before* it creates the child, so an exhausted budget
+/// refuses the command instead of leaving a process whose first stream could
+/// never be attached. Handing the claim to [`OutputBus::new_claimed`] transfers
+/// the release to the subscription that consumes it; dropping it unconsumed
+/// returns the slot.
+#[derive(Debug)]
+pub(crate) struct AttachmentClaim {
+    counter: &'static AtomicUsize,
+}
+
+impl AttachmentClaim {
+    /// Reserve one slot from the production budget.
+    pub(crate) fn claim() -> Result<Self, BusError> {
+        Self::claim_from(&GLOBAL_SUBSCRIBERS, MAX_SUBSCRIBERS_GLOBAL)
+    }
+
+    fn claim_from(global: &'static AtomicUsize, max_global: usize) -> Result<Self, BusError> {
+        // Check and increment in one atomic step: `fetch_add` followed by a
+        // comparison lets concurrent claims push the counter past the ceiling
+        // before either of them notices.
+        global
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                (held < max_global).then_some(held + 1)
+            })
+            .map(|_| Self { counter: global })
+            .map_err(|_| BusError::TooManySubscribers)
+    }
+
+    /// Hand the counted slot to the subscription that releases it on drop.
+    fn into_counter(self) -> &'static AtomicUsize {
+        let counter = self.counter;
+        // The subscription owns the release from here; forgetting the guard is
+        // what stops the same slot from being returned twice.
+        std::mem::forget(self);
+        counter
+    }
+}
+
+impl Drop for AttachmentClaim {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// The per-process output bus handle stored on the process entry.
 #[derive(Debug)]
 pub struct OutputBus {
@@ -227,8 +279,14 @@ pub struct OutputBus {
 }
 
 impl OutputBus {
-    /// Create a bus plus the subscription reserved for the first attachment.
-    pub fn new() -> (Arc<Self>, Subscription) {
+    /// Create a bus plus the subscription reserved for its first attachment,
+    /// claiming that attachment from the process-wide budget.
+    ///
+    /// Production goes through [`OutputBus::new_claimed`], which takes the claim
+    /// before the child exists; this form claims and builds in one step, which
+    /// is what the bus tests drive directly.
+    #[cfg(test)]
+    pub fn new() -> Result<(Arc<Self>, Subscription), BusError> {
         Self::with_limits(
             SUBSCRIBER_QUEUE_CAPACITY,
             DEFAULT_EVICT_AFTER,
@@ -238,11 +296,12 @@ impl OutputBus {
 
     /// Same as [`OutputBus::new`] with explicit limits, so tests can drive
     /// overflow and eviction deterministically.
+    #[cfg(test)]
     pub(crate) fn with_limits(
         capacity: usize,
         evict_after: Duration,
         max_subscribers: usize,
-    ) -> (Arc<Self>, Subscription) {
+    ) -> Result<(Arc<Self>, Subscription), BusError> {
         Self::with_global_limits(
             capacity,
             evict_after,
@@ -254,47 +313,91 @@ impl OutputBus {
 
     /// [`OutputBus::with_limits`] with the global budget injected, so a test can
     /// exhaust it deterministically.
+    #[cfg(test)]
     pub(crate) fn with_global_limits(
         capacity: usize,
         evict_after: Duration,
         max_subscribers: usize,
         global: &'static AtomicUsize,
         max_global: usize,
-    ) -> (Arc<Self>, Subscription) {
-        let bus = Arc::new(Self {
+    ) -> Result<(Arc<Self>, Subscription), BusError> {
+        let bus = Self::build(evict_after, max_subscribers, global, max_global);
+        // Claim *before* attaching. A fresh bus is not exempt from the global
+        // budget: its first attachment is exactly the one that used to escape it.
+        let claim = AttachmentClaim::claim_from(global, max_global)?;
+        let subscription = bus.attach_claimed(capacity, claim);
+        bus.spawn_reaper();
+        Ok((bus, subscription))
+    }
+
+    /// A bus whose first attachment is the slot `claim` already reserved.
+    ///
+    /// `spawn` reserves the slot before it creates the child, so nothing here
+    /// can fail: the budget was checked when the claim was taken.
+    pub(crate) fn new_claimed(claim: AttachmentClaim) -> (Arc<Self>, Subscription) {
+        let bus = Self::build(
+            DEFAULT_EVICT_AFTER,
+            MAX_SUBSCRIBERS_PER_PROCESS,
+            &GLOBAL_SUBSCRIBERS,
+            MAX_SUBSCRIBERS_GLOBAL,
+        );
+        let subscription = bus.attach_claimed(SUBSCRIBER_QUEUE_CAPACITY, claim);
+        bus.spawn_reaper();
+        (bus, subscription)
+    }
+
+    fn build(
+        evict_after: Duration,
+        max_subscribers: usize,
+        global: &'static AtomicUsize,
+        max_global: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
             subscribers: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),
             evict_after,
             max_subscribers,
             global,
             max_global,
-        });
-        // The first attachment is created after the child has been spawned, so
-        // it must never be refused: failing here would leave an orphan process
-        // behind. It still counts against the global budget, which self
-        // corrects when it is dropped.
-        let subscription = bus
-            .attach(capacity, false)
-            .expect("a fresh bus always accepts its first attachment");
-        bus.spawn_reaper();
-        (bus, subscription)
+        })
+    }
+
+    /// The first attachment of a bus. It skips the per-process limit -- by the
+    /// time it runs the child already exists, so refusing it would strand that
+    /// child -- but it never skips the global one: the slot arrives already
+    /// counted, as an [`AttachmentClaim`].
+    fn attach_claimed(self: &Arc<Self>, capacity: usize, claim: AttachmentClaim) -> Subscription {
+        let subscribers = lock(&self.subscribers);
+        self.push_subscriber(subscribers, capacity, claim.into_counter())
     }
 
     fn attach(
         self: &Arc<Self>,
         capacity: usize,
-        enforce_limits: bool,
+        enforce_per_process_limit: bool,
     ) -> Result<Subscription, BusError> {
         // One critical section for check-and-push, so concurrent `Connect`s
         // cannot both pass the per-process check.
-        let mut subscribers = lock(&self.subscribers);
-        if enforce_limits && subscribers.len() >= self.max_subscribers {
+        let subscribers = lock(&self.subscribers);
+        if enforce_per_process_limit && subscribers.len() >= self.max_subscribers {
             return Err(BusError::TooManySubscribers);
         }
-        if self.global.fetch_add(1, Ordering::AcqRel) >= self.max_global && enforce_limits {
+        // The process-wide budget bounds total per-subscriber queue memory, so
+        // it is checked for *every* attachment, first ones included.
+        if self.global.fetch_add(1, Ordering::AcqRel) >= self.max_global {
             self.global.fetch_sub(1, Ordering::AcqRel);
             return Err(BusError::TooManySubscribers);
         }
+        Ok(self.push_subscriber(subscribers, capacity, self.global))
+    }
+
+    /// Append a subscriber that has already been counted against `counter`.
+    fn push_subscriber(
+        self: &Arc<Self>,
+        mut subscribers: std::sync::MutexGuard<'_, Vec<Arc<Subscriber>>>,
+        capacity: usize,
+        counter: &'static AtomicUsize,
+    ) -> Subscription {
         let (q, rx) = TerminalChannel::new(capacity);
         let (evicted_tx, evicted_rx) = watch::channel(false);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -306,14 +409,14 @@ impl OutputBus {
             evicted: evicted_tx,
         }));
         drop(subscribers);
-        Ok(Subscription {
+        Subscription {
             bus: Arc::downgrade(self),
             id,
             rx,
             evicted: evicted_rx,
             terminal: None,
-            counter: Some(self.global),
-        })
+            counter: Some(counter),
+        }
     }
 
     /// Attach another subscription (a later `Connect`).
@@ -538,11 +641,12 @@ mod tests {
     /// Fast limits so stall and eviction paths run in milliseconds.
     fn bus_with(capacity: usize, evict_after: Duration) -> (Arc<OutputBus>, Subscription) {
         OutputBus::with_limits(capacity, evict_after, MAX_SUBSCRIBERS_PER_PROCESS)
+            .expect("a fresh bus")
     }
 
     #[tokio::test]
     async fn publish_data_reaches_every_subscriber() {
-        let (bus, mut first) = OutputBus::new();
+        let (bus, mut first) = OutputBus::new().expect("a fresh bus");
         let mut second = bus.subscribe().unwrap();
         assert_eq!(bus.subscriber_count(), 2);
         bus.publish_data(event()).await;
@@ -552,7 +656,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_a_subscription_detaches_it_immediately() {
-        let (bus, first) = OutputBus::new();
+        let (bus, first) = OutputBus::new().expect("a fresh bus");
         let second = bus.subscribe().unwrap();
         assert_eq!(bus.subscriber_count(), 2);
         drop(second);
@@ -563,7 +667,7 @@ mod tests {
 
     #[tokio::test]
     async fn closed_bus_reports_closed() {
-        let (bus, mut subscription) = OutputBus::new();
+        let (bus, mut subscription) = OutputBus::new().expect("a fresh bus");
         drop(bus);
         assert!(matches!(subscription.recv().await, Err(BusError::Closed)));
     }
@@ -711,7 +815,8 @@ mod tests {
     #[tokio::test]
     async fn the_global_attachment_budget_is_enforced_and_released() {
         static GLOBAL: AtomicUsize = AtomicUsize::new(0);
-        let (bus, first) = OutputBus::with_global_limits(2, Duration::from_secs(60), 8, &GLOBAL, 2);
+        let (bus, first) = OutputBus::with_global_limits(2, Duration::from_secs(60), 8, &GLOBAL, 2)
+            .expect("a fresh bus");
         assert_eq!(GLOBAL.load(Ordering::Acquire), 1, "the first attach counts");
         let second = bus.subscribe().unwrap();
         assert_eq!(GLOBAL.load(Ordering::Acquire), 2);
@@ -733,15 +838,19 @@ mod tests {
         assert_eq!(GLOBAL.load(Ordering::Acquire), 0);
     }
 
-    /// Two processes share one budget, and a fresh bus always accepts its first
-    /// attachment: refusing it would leave the already-spawned child orphaned.
+    /// Two processes share one budget, and the budget is a ceiling for *every*
+    /// attachment -- including the first one of a fresh bus. `spawn` claims the
+    /// slot before the child exists, so a new bus at an exhausted budget is
+    /// refused instead of silently becoming attachment 65.
     #[tokio::test]
-    async fn the_global_budget_is_shared_across_buses() {
+    async fn the_global_budget_bounds_the_first_attachment_too() {
         static GLOBAL: AtomicUsize = AtomicUsize::new(0);
         let (bus_a, first_a) =
-            OutputBus::with_global_limits(2, Duration::from_secs(60), 4, &GLOBAL, 3);
+            OutputBus::with_global_limits(2, Duration::from_secs(60), 4, &GLOBAL, 3)
+                .expect("a fresh bus");
         let (bus_b, first_b) =
-            OutputBus::with_global_limits(2, Duration::from_secs(60), 4, &GLOBAL, 3);
+            OutputBus::with_global_limits(2, Duration::from_secs(60), 4, &GLOBAL, 3)
+                .expect("a fresh bus");
         assert_eq!(GLOBAL.load(Ordering::Acquire), 2);
         let second_a = bus_a.subscribe().unwrap();
         assert_eq!(GLOBAL.load(Ordering::Acquire), 3);
@@ -750,12 +859,21 @@ mod tests {
             Err(BusError::TooManySubscribers)
         ));
 
-        // Exhausted budget, new process: the first attachment still succeeds.
-        let (bus_c, first_c) =
-            OutputBus::with_global_limits(2, Duration::from_secs(60), 4, &GLOBAL, 3);
-        assert_eq!(GLOBAL.load(Ordering::Acquire), 4);
-        drop(first_c);
-        drop(bus_c);
+        // Exhausted budget, new process: the first attachment is refused, and
+        // the refusal leaves the counter exactly at the ceiling.
+        assert!(matches!(
+            OutputBus::with_global_limits(2, Duration::from_secs(60), 4, &GLOBAL, 3),
+            Err(BusError::TooManySubscribers)
+        ));
+        assert_eq!(
+            GLOBAL.load(Ordering::Acquire),
+            3,
+            "a refused bus may not consume or exceed the budget"
+        );
+        assert!(matches!(
+            AttachmentClaim::claim_from(&GLOBAL, 3),
+            Err(BusError::TooManySubscribers)
+        ));
         assert_eq!(GLOBAL.load(Ordering::Acquire), 3);
 
         drop(second_a);
@@ -764,9 +882,81 @@ mod tests {
             2,
             "bus A's slot is reusable"
         );
-        let second_b = bus_b.subscribe().unwrap();
+        let (_bus_c, first_c) =
+            OutputBus::with_global_limits(2, Duration::from_secs(60), 4, &GLOBAL, 3)
+                .expect("the freed slot admits a fresh bus");
         assert_eq!(GLOBAL.load(Ordering::Acquire), 3);
-        drop((first_a, first_b, second_b));
+        assert!(matches!(
+            bus_b.subscribe(),
+            Err(BusError::TooManySubscribers)
+        ));
+        assert_eq!(GLOBAL.load(Ordering::Acquire), 3, "the ceiling still holds");
+        drop((first_a, first_b, first_c));
+        assert_eq!(GLOBAL.load(Ordering::Acquire), 0);
+    }
+
+    /// The counter is a hard ceiling no matter which path reaches for a slot:
+    /// fresh buses, later `Connect`s and bare claims all stop at `max_global`
+    /// and none of them leaks a slot on the way out.
+    #[tokio::test]
+    async fn the_global_counter_never_exceeds_its_ceiling() {
+        static GLOBAL: AtomicUsize = AtomicUsize::new(0);
+        let mut held = Vec::new();
+        for _ in 0..5 {
+            match OutputBus::with_global_limits(2, Duration::from_secs(60), 4, &GLOBAL, 4) {
+                Ok(pair) => held.push(pair),
+                Err(_) => break,
+            }
+            assert!(
+                GLOBAL.load(Ordering::Acquire) <= 4,
+                "a fresh bus pushed the counter past its ceiling"
+            );
+        }
+        assert_eq!(GLOBAL.load(Ordering::Acquire), 4, "the budget fills up");
+        assert!(matches!(
+            OutputBus::with_global_limits(2, Duration::from_secs(60), 4, &GLOBAL, 4),
+            Err(BusError::TooManySubscribers)
+        ));
+        assert_eq!(
+            GLOBAL.load(Ordering::Acquire),
+            4,
+            "the refusal leaks nothing"
+        );
+        for (bus, _first) in &held {
+            assert!(matches!(bus.subscribe(), Err(BusError::TooManySubscribers)));
+            assert!(GLOBAL.load(Ordering::Acquire) <= 4);
+        }
+        drop(held);
+        assert_eq!(GLOBAL.load(Ordering::Acquire), 0);
+    }
+
+    /// `spawn` claims before it creates the child, so the claim has to release
+    /// the slot on every early return: a failed command must not hold a budget
+    /// slot for a process that never existed.
+    #[tokio::test]
+    async fn a_dropped_claim_returns_its_slot() {
+        static GLOBAL: AtomicUsize = AtomicUsize::new(0);
+        let claim = AttachmentClaim::claim_from(&GLOBAL, 1).expect("the budget is free");
+        assert_eq!(GLOBAL.load(Ordering::Acquire), 1);
+        assert!(matches!(
+            AttachmentClaim::claim_from(&GLOBAL, 1),
+            Err(BusError::TooManySubscribers)
+        ));
+        assert_eq!(
+            GLOBAL.load(Ordering::Acquire),
+            1,
+            "a refused claim leaks nothing"
+        );
+        drop(claim);
+        assert_eq!(GLOBAL.load(Ordering::Acquire), 0);
+
+        // The released slot is immediately usable, and handing a claim to a bus
+        // transfers the release to its first subscription.
+        let claim = AttachmentClaim::claim_from(&GLOBAL, 1).expect("the slot came back");
+        let (bus, first) = OutputBus::new_claimed(claim);
+        assert_eq!(GLOBAL.load(Ordering::Acquire), 1);
+        drop(first);
+        drop(bus);
         assert_eq!(GLOBAL.load(Ordering::Acquire), 0);
     }
 
@@ -827,7 +1017,7 @@ mod tests {
 
     #[tokio::test]
     async fn publishing_without_subscribers_is_a_no_op() {
-        let (bus, first) = OutputBus::new();
+        let (bus, first) = OutputBus::new().expect("a fresh bus");
         drop(first);
         bus.publish_data(event()).await;
         assert!(!bus.publish_terminal(event()));
@@ -837,7 +1027,8 @@ mod tests {
     #[tokio::test]
     async fn subscription_limit_is_enforced_per_process() {
         let (bus, _first) =
-            OutputBus::with_limits(SUBSCRIBER_QUEUE_CAPACITY, Duration::from_secs(60), 2);
+            OutputBus::with_limits(SUBSCRIBER_QUEUE_CAPACITY, Duration::from_secs(60), 2)
+                .expect("a fresh bus");
         let _second = bus.subscribe().unwrap();
         assert_eq!(bus.subscribe().unwrap_err(), BusError::TooManySubscribers);
     }

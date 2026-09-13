@@ -265,7 +265,7 @@ mod tests {
     /// Build a ProcEntry with a throwaway output bus — these tests exercise
     /// pid/tag resolution and reaping, never the output bus itself.
     fn proc_entry(pid: u32, tag: Option<&str>) -> ProcEntry {
-        let (sender, _rx) = crate::process::OutputBus::new();
+        let (sender, _rx) = crate::process::OutputBus::new().expect("a fresh bus");
         ProcEntry {
             pid,
             tag: tag.map(String::from),
@@ -331,7 +331,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_resolves_and_skips_pre_attach_history() {
         let s = ProcessTable::new(Arc::new(crate::process::cgroup::NoopManager));
-        let (tx, _rx) = crate::process::OutputBus::new();
+        let (tx, _rx) = crate::process::OutputBus::new().expect("a fresh bus");
         let data = |v: &str| {
             engine::PumpEvent::Data(crate::process::wire::DataEvent {
                 stdout: Some(v.into()),
@@ -378,7 +378,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_after_terminal_publication_gets_cached_event() {
         let s = ProcessTable::new(Arc::new(crate::process::cgroup::NoopManager));
-        let (sender, _rx) = crate::process::OutputBus::new();
+        let (sender, _rx) = crate::process::OutputBus::new().expect("a fresh bus");
         let handle = s.insert_process(ProcEntry {
             pid: 9,
             tag: Some("finished".into()),
@@ -427,7 +427,7 @@ mod tests {
 
         // A live process whose "pty" is not a terminal → ioctl fails → Io.
         let not_a_tty = std::fs::File::open("/dev/null").unwrap();
-        let (sender, _rx) = crate::process::OutputBus::new();
+        let (sender, _rx) = crate::process::OutputBus::new().expect("a fresh bus");
         s.insert_process(ProcEntry {
             pid: 8,
             tag: Some("bad-pty".into()),
