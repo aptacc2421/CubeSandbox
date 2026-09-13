@@ -54,7 +54,9 @@ fn main() {
         .expect("build tokio runtime");
 
     runtime.block_on(async move {
-        let state = Arc::new(app::state::AppState::new().with_cgroup(process::cgroup::init()));
+        let state = Arc::new(
+            app::state::AppState::new().with_cgroup(process::cgroup::init(cli.cgroup_memory_max)),
+        );
         let app = routes::router(state);
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], cli.port));
         let listener = match tokio::net::TcpListener::bind(addr).await {
