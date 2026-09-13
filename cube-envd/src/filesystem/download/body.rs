@@ -50,12 +50,12 @@ pub(super) const DOWNLOAD_STREAM_SLICE: usize = 256 * 1024;
 /// Read size for one body: a sixteenth of its length, clamped to
 /// [`DOWNLOAD_STREAM_SLICE`]..[`DOWNLOAD_CHUNK`].
 ///
-/// The pool keeps `READ_AHEAD + 2` buffers per body, so a fixed 1 MiB chunk
-/// costs every connection ~4 MiB of buffer capacity whatever it is sending.
-/// Sizing the chunk to the body keeps that footprint proportional to the body
-/// (1 MiB of buffers for a 4 MiB file) and still gives large bodies the full
-/// chunk, where the syscall measurements say it pays. A `None` limit (a body of
-/// unknown length) has nothing to scale by and keeps the ceiling.
+/// A body holds `READ_AHEAD + 2` buffers in flight at once, so a fixed 1 MiB
+/// chunk costs every connection ~4 MiB of buffer capacity whatever it is
+/// sending. Sizing the chunk to the body keeps that footprint proportional to
+/// the body (1 MiB of buffers for a 4 MiB file) and still gives large bodies
+/// the full chunk, where the syscall measurements say it pays. A `None` limit
+/// (a body of unknown length) has nothing to scale by and keeps the ceiling.
 pub(super) fn chunk_for(limit: Option<u64>) -> usize {
     match limit {
         Some(n) => ((n / 16) as usize).clamp(DOWNLOAD_STREAM_SLICE, DOWNLOAD_CHUNK),
@@ -82,54 +82,62 @@ impl Drop for PooledBuffer {
     }
 }
 
-/// Recycled read buffers. Allocating a fresh `DOWNLOAD_CHUNK` buffer per read
-/// costs an `mmap`, a `munmap` and a page-faulting zero-fill of the whole
-/// chunk — under musl that was 278 syscalls per 32 MiB download (142 `mmap` +
-/// 136 `munmap`), a quarter of the whole path's budget. Recycling keeps the
-/// allocation count per body constant instead of per chunk.
-#[derive(Clone)]
-pub(super) struct ReadPool {
-    pub(super) free: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
-    len: usize,
-    /// Buffers kept for reuse: `READ_AHEAD` queued, one being filled by the
-    /// reader and one in flight to the socket.
-    pub(super) keep: usize,
+/// How much recycled buffer memory the process-wide pool may hold.
+///
+/// The pool is what keeps a body from faulting in fresh pages: measured in a
+/// 2 vCPU guest at 32 concurrent 4 MiB downloads, allocating per body cost
+/// **73.6 minor faults per MiB** against 4.7 for a reader that reuses one
+/// buffer for the whole body and 0.1 for Go's `sendfile`. 32 MiB is the
+/// default budget's own working set (32 buffered bodies x 1 MiB), so the pool
+/// recycles that set instead of becoming a memory policy of its own.
+pub(super) const DOWNLOAD_POOL_BYTES: usize = 32 * 1024 * 1024;
+
+/// Recycled read buffers. A fresh allocation per read costs an `mmap`, a
+/// `munmap` and a page-faulting zero-fill of the whole chunk — under musl that
+/// was 278 syscalls per 32 MiB download (142 `mmap` + 136 `munmap`), a quarter
+/// of the whole path's budget — and doing it once per *body* pays the page
+/// faults again on every request.
+struct PoolInner {
+    free: std::sync::Mutex<Vec<Vec<u8>>>,
+    retained: std::sync::atomic::AtomicUsize,
+    budget: usize,
 }
 
+#[derive(Clone)]
+pub(super) struct ReadPool(std::sync::Arc<PoolInner>);
+
 impl ReadPool {
-    pub(super) fn new(len: usize) -> ReadPool {
-        let len = len.max(1);
-        ReadPool {
+    /// A pool holding at most `budget` bytes of recycled buffers.
+    pub(super) fn new(budget: usize) -> ReadPool {
+        ReadPool(std::sync::Arc::new(PoolInner {
             free: Default::default(),
-            len,
-            keep: DOWNLOAD_READ_AHEAD + 2,
-        }
+            retained: std::sync::atomic::AtomicUsize::new(0),
+            budget,
+        }))
     }
 
-    /// A buffer of at least `len` bytes, reused when one is free.
-    pub(super) fn take(&self) -> Vec<u8> {
-        let recycled = match self.free.lock() {
-            Ok(mut free) => free.pop(),
-            // A poisoned lock only means some *other* download's body task
-            // panicked; the buffers themselves are plain bytes.
-            Err(poisoned) => poisoned.into_inner().pop(),
-        };
-        recycled.unwrap_or_else(|| vec![0u8; self.len])
-    }
-
-    fn recycle(&self, buf: Vec<u8>) {
-        if buf.len() != self.len {
-            return;
+    /// A buffer of at least `len` bytes: the smallest recycled one that fits,
+    /// or a fresh zeroed allocation.
+    pub(super) fn take(&self, len: usize) -> Vec<u8> {
+        let len = len.max(1);
+        // A poisoned lock only means some *other* download's body task
+        // panicked; the buffers themselves are plain bytes.
+        let mut free = lock(&self.0.free);
+        let fit = free
+            .iter()
+            .enumerate()
+            .filter(|(_, buf)| buf.capacity() >= len)
+            .min_by_key(|(_, buf)| buf.capacity())
+            .map(|(i, _)| i);
+        if let Some(i) = fit {
+            let buf = free.swap_remove(i);
+            self.0
+                .retained
+                .fetch_sub(buf.capacity(), std::sync::atomic::Ordering::Relaxed);
+            return buf;
         }
-        // Bound both arms: a poisoned lock must not turn the pool into an
-        // unbounded one (same reasoning as `take`'s poison handling).
-        let mut free = match self.free.lock() {
-            Ok(free) => free,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if free.len() < self.keep {
-            free.push(buf);
-        }
+        drop(free);
+        vec![0u8; len]
     }
 
     /// `Bytes` over the first `n` bytes of `buf`, recycled when dropped.
@@ -139,6 +147,52 @@ impl ReadPool {
             buf,
         })
         .slice(..n)
+    }
+
+    /// Keep a buffer for the next body while the pool is under its budget.
+    fn recycle(&self, buf: Vec<u8>) {
+        let cap = buf.capacity();
+        if cap == 0 || cap > DOWNLOAD_CHUNK {
+            return;
+        }
+        let mut free = lock(&self.0.free);
+        if self.0.retained.load(std::sync::atomic::Ordering::Relaxed) + cap > self.0.budget {
+            return;
+        }
+        self.0
+            .retained
+            .fetch_add(cap, std::sync::atomic::Ordering::Relaxed);
+        free.push(buf);
+    }
+
+    /// Bytes parked in the free list.
+    #[cfg(test)]
+    pub(super) fn retained(&self) -> usize {
+        self.0.retained.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(super) fn budget(&self) -> usize {
+        self.0.budget
+    }
+
+    #[cfg(test)]
+    pub(super) fn free_len(&self) -> usize {
+        lock(&self.0.free).len()
+    }
+}
+
+/// The process-wide pool every body recycles through.
+pub(super) fn pool() -> ReadPool {
+    static POOL: std::sync::OnceLock<ReadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| ReadPool::new(DOWNLOAD_POOL_BYTES))
+        .clone()
+}
+
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -253,10 +307,7 @@ pub(super) async fn reader_stream_with(
         Err(_) => {
             // Tier 3: no buffered slot, so stream 256 KiB slices without
             // read-ahead and hold nothing else.
-            let pool = ReadPool::new(match limit {
-                Some(n) => (n as usize).min(DOWNLOAD_STREAM_SLICE),
-                None => DOWNLOAD_STREAM_SLICE,
-            });
+            let pool = pool();
             let (tx, rx) = tokio::sync::mpsc::channel(1);
             tokio::spawn(read_ahead(
                 file,
@@ -274,7 +325,7 @@ pub(super) async fn reader_stream_with(
         }
     };
     let chunk = chunk_for(limit);
-    let pool = ReadPool::new(chunk);
+    let pool = pool();
     let (tx, rx) = tokio::sync::mpsc::channel(DOWNLOAD_READ_AHEAD);
     match budgets.blocking.try_acquire_owned() {
         Ok(blocking) => {
@@ -319,7 +370,7 @@ fn read_ahead_blocking(
             Some(r) => r.min(chunk as u64) as usize,
             None => chunk,
         };
-        let mut buf = pool.take();
+        let mut buf = pool.take(want);
         match file.read(&mut buf[..want]) {
             Ok(0) => return,
             Ok(n) => {
@@ -358,7 +409,7 @@ pub(super) async fn read_ahead(
             Some(r) => r.min(chunk as u64) as usize,
             None => chunk,
         };
-        let mut buf = pool.take();
+        let mut buf = pool.take(want);
         match file.read(&mut buf[..want]).await {
             Ok(0) => return,
             Ok(n) => {

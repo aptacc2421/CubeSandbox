@@ -147,34 +147,45 @@ async fn read_errors_are_delivered() {
 }
 
 /// The pool is what keeps a 1 MiB chunk from paying an allocation per
-/// read; pin both halves of it (recycle on last drop, and stay bounded).
+/// read; pin all of it (recycle on last drop, reuse the same allocation, and
+/// stay inside the byte budget).
 #[test]
 fn pooled_buffers_recycle_and_the_pool_stays_bounded() {
-    let pool = ReadPool::new(64);
-    let bytes = pool.bytes(pool.take(), 8);
+    let pool = ReadPool::new(256);
+    let bytes = pool.bytes(pool.take(64), 8);
     assert_eq!(bytes.len(), 8);
     let live = bytes.clone();
     drop(bytes);
     assert_eq!(
-        pool.free.lock().unwrap().len(),
+        pool.free_len(),
         0,
         "a live slice keeps the buffer out of the pool"
     );
     drop(live);
-    assert_eq!(
-        pool.free.lock().unwrap().len(),
-        1,
-        "the last slice recycles the buffer"
-    );
-    let held: Vec<bytes::Bytes> = (0..(DOWNLOAD_READ_AHEAD + 4))
-        .map(|_| pool.bytes(pool.take(), 1))
-        .collect();
+    assert_eq!(pool.free_len(), 1, "the last slice recycles the buffer");
+    assert_eq!(pool.retained(), 64);
+
+    // The whole point of a process-wide pool: the next body gets the same
+    // allocation back instead of faulting in fresh pages.
+    let again = pool.take(64);
+    assert_eq!(pool.free_len(), 0);
+    assert_eq!(pool.retained(), 0);
+    assert_eq!(again.capacity(), 64);
+
+    // A body that needs more than the pool holds gets a fresh buffer without
+    // disturbing the recycled one.
+    let bigger = pool.take(512);
+    assert_eq!(bigger.capacity(), 512);
+    assert_eq!(pool.free_len(), 0);
+
+    // Six 64-byte buffers come back, but only four fit in 256 bytes.
+    let held: Vec<bytes::Bytes> = (0..6).map(|_| pool.bytes(pool.take(64), 1)).collect();
     drop(held);
-    assert_eq!(
-        pool.free.lock().unwrap().len(),
-        pool.keep,
-        "surplus buffers are dropped instead of retained"
-    );
+    drop(again);
+    drop(bigger);
+    assert_eq!(pool.retained(), 256, "surplus buffers are dropped");
+    assert_eq!(pool.free_len(), 4);
+    assert!(pool.retained() <= pool.budget());
 }
 
 /// The pipeline's only new failure mode: the client goes away mid-body.
@@ -190,7 +201,7 @@ async fn dropping_the_body_stops_the_producer_and_recycles_its_buffers() {
     write_pattern(&path, size);
 
     let file = tokio::fs::File::open(&path).await.unwrap();
-    let pool = ReadPool::new(DOWNLOAD_CHUNK);
+    let pool = ReadPool::new(DOWNLOAD_CHUNK * 8);
     let (tx, mut rx) = tokio::sync::mpsc::channel(DOWNLOAD_READ_AHEAD);
     let producer = tokio::spawn(read_ahead(
         file,
@@ -221,11 +232,16 @@ async fn dropping_the_body_stops_the_producer_and_recycles_its_buffers() {
         .expect("the producer task must not panic");
 
     drop(taken);
-    let free = pool.free.lock().unwrap().len();
+    let free = pool.free_len();
     assert!(
-        free > DOWNLOAD_READ_AHEAD && free <= pool.keep,
-        "every buffer came back and the pool did not grow (free = {free}, keep = {})",
-        pool.keep
+        free >= DOWNLOAD_READ_AHEAD + 2,
+        "every buffer came back (free = {free})"
+    );
+    assert!(
+        pool.retained() <= pool.budget(),
+        "the pool stayed inside its budget ({} <= {})",
+        pool.retained(),
+        pool.budget()
     );
 }
 
