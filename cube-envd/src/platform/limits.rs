@@ -96,18 +96,13 @@ pub fn download_buffered_bodies() -> usize {
 /// default — however large the pool is configured. A body holds up to
 /// `READ_AHEAD + 2` buffers, and keeping one per buffered body warm is what
 /// removes the per-request page faults; above ~8..16 MiB the curve flattens.
-pub fn download_pool_bytes() -> usize {
-    download_pool_bytes_at(blocking_threads())
+pub fn download_pool_bytes(chunk_bytes: usize) -> usize {
+    download_pool_bytes_at(blocking_threads(), chunk_bytes)
 }
 
-fn download_pool_bytes_at(pool: usize) -> usize {
-    download_buffered_bodies_at(pool).min(DOWNLOAD_POOL_BODIES_MAX) * DOWNLOAD_POOL_CHUNK
+fn download_pool_bytes_at(pool: usize, chunk_bytes: usize) -> usize {
+    download_buffered_bodies_at(pool).min(DOWNLOAD_POOL_BODIES_MAX) * chunk_bytes
 }
-
-/// Read size the pool budget is expressed in. Kept here rather than importing
-/// the body pipeline's constant (it lives a layer above); a test in
-/// `filesystem::download` asserts the two agree.
-const DOWNLOAD_POOL_CHUNK: usize = 1024 * 1024;
 
 /// Hard ceiling of the pool budget, in buffered bodies: 32 MiB. The pool stays
 /// a bounded working set even when the pool itself is configured for hundreds
@@ -323,26 +318,31 @@ mod tests {
     }
 
     #[test]
-    fn the_pool_budget_scales_with_the_pool() {
+    fn the_pool_budget_scales_with_the_pool_and_the_chunk() {
+        const MIB: usize = 1024 * 1024;
         // One read buffer per buffered body: 32 MiB at the default pool, and it
         // follows the knob both ways, so a small deployment does not hold a
-        // default-sized cache and a large one may keep more warm.
-        assert_eq!(download_pool_bytes_at(64), 32 * 1024 * 1024);
-        assert_eq!(download_pool_bytes_at(8), 4 * 1024 * 1024);
-        assert_eq!(download_pool_bytes_at(4), 2 * 1024 * 1024);
-        // It scales down with the knob and never past the 32 MiB ceiling.
+        // default-sized cache.
+        assert_eq!(download_pool_bytes_at(64, MIB), 32 * MIB);
+        assert_eq!(download_pool_bytes_at(8, MIB), 4 * MIB);
+        assert_eq!(download_pool_bytes_at(4, MIB), 2 * MIB);
+        // It scales down with the knob and never past the 32 MiB ceiling, at any
+        // chunk size the body pipeline may hand it.
         for pool in [4usize, 8, 16, 64, 128, 256, 1024] {
-            let bodies = download_buffered_bodies_at(pool).min(DOWNLOAD_POOL_BODIES_MAX);
-            assert_eq!(
-                download_pool_bytes_at(pool),
-                bodies * DOWNLOAD_POOL_CHUNK,
-                "pool = {pool}"
-            );
-            assert!(
-                download_pool_bytes_at(pool) <= 32 * 1024 * 1024,
-                "pool = {pool}"
-            );
+            for chunk in [256 * 1024usize, MIB] {
+                let bodies = download_buffered_bodies_at(pool).min(DOWNLOAD_POOL_BODIES_MAX);
+                assert_eq!(
+                    download_pool_bytes_at(pool, chunk),
+                    bodies * chunk,
+                    "pool = {pool}, chunk = {chunk}"
+                );
+                assert!(
+                    download_pool_bytes_at(pool, chunk) <= 32 * MIB,
+                    "pool = {pool}, chunk = {chunk}"
+                );
+            }
         }
-        assert_eq!(download_pool_bytes_at(256), 32 * 1024 * 1024);
+        assert_eq!(download_pool_bytes_at(256, MIB), 32 * MIB);
+        assert_eq!(download_pool_bytes_at(256, 256 * 1024), 8 * MIB);
     }
 }

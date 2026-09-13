@@ -31,11 +31,13 @@
 //! memory with the connection count (~1.3 MiB per body instead of ~5 MiB).
 //!
 //! The chunk is a ceiling, not a constant: [`chunk_for`] scales it down with the
-//! body, because a pool holds its buffers per *body* — a fixed 1 MiB slice made
-//! every connection carry ~4 MiB of buffers no matter how little it sent, which
-//! thirty-two concurrent 4 MiB downloads turned into 211 -> 224 MiB of peak RSS
-//! (against 21 MiB for the old 64 KiB reader and 15.7 MiB for Go) with no
-//! throughput to show for it.
+//! body, because one body holds `READ_AHEAD + 2` buffers at once, so a fixed
+//! 1 MiB slice made every connection carry ~4 MiB of buffer capacity no matter
+//! how little it sent — thirty-two concurrent 4 MiB downloads turned that into
+//! 211 -> 224 MiB of peak RSS (against 21 MiB for the old 64 KiB reader and
+//! 15.7 MiB for Go) with no throughput to show for it. The buffers themselves
+//! are recycled through one process-wide [`ReadPool`], so the chunk also decides
+//! how much of that pool one body occupies.
 
 /// Read size for a buffered body (see the module doc for the measurements).
 pub(super) const DOWNLOAD_CHUNK: usize = 1024 * 1024;
@@ -118,21 +120,27 @@ impl ReadPool {
         }))
     }
 
-    /// A buffer of at least `len` bytes: the smallest recycled one that fits,
-    /// or a fresh zeroed allocation.
-    pub(super) fn take(&self, len: usize) -> Vec<u8> {
-        let len = len.max(1);
+    /// A buffer of at least `len` bytes and at most `max` bytes — the caller's
+    /// size class, so a 256 KiB body cannot take a 1 MiB buffer and hold it for
+    /// its life. The smallest recycled one that fits, or a fresh allocation.
+    ///
+    /// Callers index `buf[..want]`, so the filter is on `len()`, not
+    /// `capacity()`; `recycle` only keeps buffers where the two are equal, which
+    /// the assert pins down.
+    pub(super) fn take(&self, len: usize, max: usize) -> Vec<u8> {
+        let len = len.clamp(1, max.max(1));
         // A poisoned lock only means some *other* download's body task
         // panicked; the buffers themselves are plain bytes.
         let mut free = lock(&self.0.free);
         let fit = free
             .iter()
             .enumerate()
-            .filter(|(_, buf)| buf.capacity() >= len)
-            .min_by_key(|(_, buf)| buf.capacity())
+            .filter(|(_, buf)| buf.len() >= len && buf.len() <= max)
+            .min_by_key(|(_, buf)| buf.len())
             .map(|(i, _)| i);
         if let Some(i) = fit {
             let buf = free.swap_remove(i);
+            debug_assert_eq!(buf.len(), buf.capacity(), "pooled buffers are exact");
             self.0
                 .retained
                 .fetch_sub(buf.capacity(), std::sync::atomic::Ordering::Relaxed);
@@ -152,9 +160,12 @@ impl ReadPool {
     }
 
     /// Keep a buffer for the next body while the pool is under its budget.
+    ///
+    /// Only exact-size buffers are kept (`len == capacity`), which is what lets
+    /// `take` filter on `len()` and lets callers index `buf[..want]` safely.
     fn recycle(&self, buf: Vec<u8>) {
         let cap = buf.capacity();
-        if cap == 0 || cap > DOWNLOAD_CHUNK {
+        if cap == 0 || cap > DOWNLOAD_CHUNK || buf.len() != cap {
             return;
         }
         let mut free = lock(&self.0.free);
@@ -187,7 +198,7 @@ impl ReadPool {
 /// The process-wide pool every body recycles through.
 pub(super) fn pool() -> ReadPool {
     static POOL: std::sync::OnceLock<ReadPool> = std::sync::OnceLock::new();
-    POOL.get_or_init(|| ReadPool::new(crate::platform::limits::download_pool_bytes()))
+    POOL.get_or_init(|| ReadPool::new(crate::platform::limits::download_pool_bytes(DOWNLOAD_CHUNK)))
         .clone()
 }
 
@@ -372,9 +383,14 @@ fn read_ahead_blocking(
             Some(r) => r.min(chunk as u64) as usize,
             None => chunk,
         };
-        let mut buf = pool.take(want);
+        let mut buf = pool.take(want, chunk);
         match file.read(&mut buf[..want]) {
-            Ok(0) => return,
+            // EOF: hand the buffer back before leaving, or every body sends one
+            // buffer to the allocator instead of the pool.
+            Ok(0) => {
+                pool.recycle(buf);
+                return;
+            }
             Ok(n) => {
                 if let Some(r) = limit.as_mut() {
                     *r -= n as u64;
@@ -386,6 +402,7 @@ fn read_ahead_blocking(
                 }
             }
             Err(e) => {
+                pool.recycle(buf);
                 let _ = tx.blocking_send(Err(e));
                 return;
             }
@@ -411,9 +428,12 @@ pub(super) async fn read_ahead(
             Some(r) => r.min(chunk as u64) as usize,
             None => chunk,
         };
-        let mut buf = pool.take(want);
+        let mut buf = pool.take(want, chunk);
         match file.read(&mut buf[..want]).await {
-            Ok(0) => return,
+            Ok(0) => {
+                pool.recycle(buf);
+                return;
+            }
             Ok(n) => {
                 if let Some(r) = limit.as_mut() {
                     *r -= n as u64;
@@ -425,6 +445,7 @@ pub(super) async fn read_ahead(
                 }
             }
             Err(e) => {
+                pool.recycle(buf);
                 let _ = tx.send(Err(e)).await;
                 return;
             }

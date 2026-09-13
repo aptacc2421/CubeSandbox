@@ -144,6 +144,26 @@ async fn read_errors_are_delivered() {
     let chunks = collect(file, Some(DOWNLOAD_CHUNK as u64 + 1)).await;
     assert_eq!(chunks.len(), 1);
     assert!(chunks.into_iter().next().unwrap().is_err());
+
+    // The error return holds a buffer too, and must give it back.
+    let pool = ReadPool::new(DOWNLOAD_CHUNK * 8);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(DOWNLOAD_READ_AHEAD);
+    read_ahead(
+        tokio::fs::File::open(dir.path()).await.unwrap(),
+        Some(DOWNLOAD_CHUNK as u64 + 1),
+        pool.clone(),
+        tx,
+        DOWNLOAD_CHUNK,
+        BudgetGuard {
+            _in_flight: None,
+            _blocking: None,
+            _buffered: None,
+        },
+    )
+    .await;
+    assert!(rx.recv().await.unwrap().is_err());
+    drop(rx);
+    assert_eq!(pool.free_len(), 1, "the error return recycled its buffer");
 }
 
 /// The pool is what keeps a 1 MiB chunk from paying an allocation per
@@ -152,7 +172,7 @@ async fn read_errors_are_delivered() {
 #[test]
 fn pooled_buffers_recycle_and_the_pool_stays_bounded() {
     let pool = ReadPool::new(256);
-    let bytes = pool.bytes(pool.take(64), 8);
+    let bytes = pool.bytes(pool.take(64, 64), 8);
     assert_eq!(bytes.len(), 8);
     let live = bytes.clone();
     drop(bytes);
@@ -167,19 +187,19 @@ fn pooled_buffers_recycle_and_the_pool_stays_bounded() {
 
     // The whole point of a process-wide pool: the next body gets the same
     // allocation back instead of faulting in fresh pages.
-    let again = pool.take(64);
+    let again = pool.take(64, 64);
     assert_eq!(pool.free_len(), 0);
     assert_eq!(pool.retained(), 0);
     assert_eq!(again.capacity(), 64);
 
     // A body that needs more than the pool holds gets a fresh buffer without
     // disturbing the recycled one.
-    let bigger = pool.take(512);
+    let bigger = pool.take(512, 512);
     assert_eq!(bigger.capacity(), 512);
     assert_eq!(pool.free_len(), 0);
 
     // Six 64-byte buffers come back, but only four fit in 256 bytes.
-    let held: Vec<bytes::Bytes> = (0..6).map(|_| pool.bytes(pool.take(64), 1)).collect();
+    let held: Vec<bytes::Bytes> = (0..6).map(|_| pool.bytes(pool.take(64, 64), 1)).collect();
     drop(held);
     drop(again);
     drop(bigger);
@@ -433,21 +453,124 @@ async fn the_unbuffered_tier_streams_the_same_bytes() {
     assert_eq!(total(&small), DOWNLOAD_CHUNK);
 }
 
-/// The pool's budget is derived from the same knob as the body budgets, so the
-/// two cannot drift apart; the constant the platform layer divides by must be
-/// the chunk this layer actually reads in.
+/// A body must not send its buffers to the allocator on the way out: the
+/// producer stops on `Ok(0)` (and on error) holding a buffer, and that buffer is
+/// exactly the one the next body wants.
+#[tokio::test]
+async fn the_producer_recycles_the_buffer_it_stops_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("exact.bin");
+    // Exact multiple of the chunk: the producer reads EOF on its third take.
+    let size = DOWNLOAD_CHUNK * 2;
+    write_pattern(&path, size);
+
+    let pool = ReadPool::new(DOWNLOAD_CHUNK * 8);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(DOWNLOAD_READ_AHEAD);
+    // `None` on purpose: with a known length the loop leaves through
+    // `Some(0) => return` *before* taking a buffer, so the `Ok(0)` arm — the one
+    // a shrinking file (or an unknown length) reaches — is only exercised here.
+    let producer = tokio::spawn(read_ahead(
+        tokio::fs::File::open(&path).await.unwrap(),
+        None,
+        pool.clone(),
+        tx,
+        DOWNLOAD_CHUNK,
+        BudgetGuard {
+            _in_flight: None,
+            _blocking: None,
+            _buffered: None,
+        },
+    ));
+    let mut delivered = Vec::new();
+    while let Some(chunk) = rx.recv().await {
+        delivered.push(chunk.unwrap());
+    }
+    producer.await.unwrap();
+    assert_eq!(delivered.len(), 2);
+    drop(delivered);
+    for _ in 0..200 {
+        if pool.free_len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        pool.free_len(),
+        3,
+        "two delivered buffers plus the one the EOF return was holding"
+    );
+
+    // ... and with a known length the buffer flow is the same, minus the EOF
+    // take: this is the shape every /files response uses.
+    let pool = ReadPool::new(DOWNLOAD_CHUNK * 8);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(DOWNLOAD_READ_AHEAD);
+    tokio::spawn(read_ahead(
+        tokio::fs::File::open(&path).await.unwrap(),
+        Some(size as u64),
+        pool.clone(),
+        tx,
+        DOWNLOAD_CHUNK,
+        BudgetGuard {
+            _in_flight: None,
+            _blocking: None,
+            _buffered: None,
+        },
+    ))
+    .await
+    .unwrap();
+    let mut delivered = Vec::new();
+    while let Some(chunk) = rx.recv().await {
+        delivered.push(chunk.unwrap());
+    }
+    drop(delivered);
+    for _ in 0..200 {
+        if pool.free_len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(pool.free_len(), 2, "both buffers came back");
+}
+
+/// `take` is bounded by the caller's size class: a 256 KiB body must not park a
+/// 1 MiB buffer for its whole life, and the 1 MiB class must still find it.
 #[test]
-fn the_pool_budget_matches_the_body_budget_and_the_chunk() {
+fn the_pool_keeps_size_classes_apart() {
+    let mib = 1 << 20;
+    let slice = DOWNLOAD_STREAM_SLICE;
+    let pool = ReadPool::new(4 * mib);
+    let big = pool.take(mib, mib);
+    assert_eq!(big.len(), mib);
+    drop(pool.bytes(big, 1));
+    assert_eq!(pool.free_len(), 1);
+
+    let small = pool.take(slice, slice);
+    assert_eq!(small.len(), slice, "a fresh slice-sized buffer");
+    assert_eq!(pool.free_len(), 1, "the 1 MiB buffer stays parked");
+
+    let big_again = pool.take(mib, mib);
+    assert_eq!(big_again.len(), mib, "the 1 MiB class still finds it");
+    assert_eq!(pool.free_len(), 0);
+}
+
+/// The pool's budget is derived from the same knob as the body budgets, is
+/// expressed in this pipeline's chunk, and is capped — the three properties the
+/// startup line and the memory bound rely on.
+#[test]
+fn the_pool_budget_follows_the_body_budget_and_the_chunk() {
     let buffered = crate::platform::limits::download_buffered_bodies();
     assert_eq!(
-        crate::platform::limits::download_pool_bytes(),
-        buffered * DOWNLOAD_CHUNK,
-        "one buffer per buffered body"
+        super::pool_budget_bytes(),
+        crate::platform::limits::download_pool_bytes(DOWNLOAD_CHUNK)
     );
     assert_eq!(
-        DOWNLOAD_CHUNK,
-        1024 * 1024,
-        "the platform layer's DOWNLOAD_POOL_CHUNK assumes 1 MiB"
+        super::pool_budget_bytes(),
+        buffered.min(32) * DOWNLOAD_CHUNK,
+        "one buffer per buffered body, at most 32"
+    );
+    assert!(
+        super::pool_budget_bytes() <= 32 << 20,
+        "the pool has a ceiling"
     );
 }
 

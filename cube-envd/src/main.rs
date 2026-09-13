@@ -62,7 +62,7 @@ fn main() {
         download_blocking_producers = platform::limits::download_blocking_producers(),
         download_buffered_bodies = platform::limits::download_buffered_bodies(),
         download_max_bodies = platform::limits::download_max_bodies(),
-        download_pool_bytes = platform::limits::download_pool_bytes(),
+        download_pool_bytes = filesystem::download::pool_budget_bytes(),
         "runtime limits"
     );
 

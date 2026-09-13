@@ -20,6 +20,13 @@ mod tests;
 
 use body::{acquire_in_flight, in_flight_budget, reader_stream};
 
+/// Byte budget of the recycled read-buffer pool, for the startup log. The chunk
+/// the budget is expressed in belongs to the body pipeline, so the derivation
+/// lives in `platform::limits` and the size comes from here.
+pub(crate) fn pool_budget_bytes() -> usize {
+    crate::platform::limits::download_pool_bytes(body::DOWNLOAD_CHUNK)
+}
+
 /// GET /files — stream a file back with upstream `http.ServeContent`
 /// semantics: Last-Modified, conditional requests (If-Match / If-Unmodified-
 /// Since / If-None-Match / If-Modified-Since / If-Range → 304/412), Range

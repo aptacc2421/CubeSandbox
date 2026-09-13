@@ -197,7 +197,7 @@ docker run -e ENVD_EXTRA_ARGS="-blocking-threads 8 -download-max-bodies 64" ...
 启动时会打印生效值：
 
 ```
-INFO runtime limits blocking_threads=64 download_blocking_producers=16 download_buffered_bodies=32 download_max_bodies=128
+INFO runtime limits blocking_threads=64 download_blocking_producers=16 download_buffered_bodies=32 download_max_bodies=128 download_pool_bytes=33554432
 ```
 
 完整旋钮清单（含 daemon 同样支持的 `CUBE_ENVD_CGROUP_*`）见 `cube-envd/README.md`。

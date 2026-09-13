@@ -206,7 +206,7 @@ the cgroup cap, e.g. `ENVD_EXTRA_ARGS="-cgroup-memory-max-bytes 268435456"`
 (256 MiB). envd logs the effective values once at startup:
 
 ```
-INFO runtime limits blocking_threads=64 download_blocking_producers=16 download_buffered_bodies=32 download_max_bodies=128
+INFO runtime limits blocking_threads=64 download_blocking_producers=16 download_buffered_bodies=32 download_max_bodies=128 download_pool_bytes=33554432
 ```
 
 `cube-envd/README.md` lists the full knob set, including the two
