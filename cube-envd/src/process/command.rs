@@ -18,7 +18,7 @@ use crate::process::cgroup::{self, ProcType};
 use crate::process::engine;
 use crate::process::table::{ProcEntry, ProcessTable, PtyResizeError};
 use crate::process::wire::{
-    parse_signal, CloseStdinRequest, ConnectRequest, ListResponse, ProcessInfo, ProcessInput,
+    decode_signal, CloseStdinRequest, ConnectRequest, ListResponse, ProcessInfo, ProcessInput,
     ProcessSelector, SendInputRequest, SendSignalRequest, StartRequest, StreamInputRequest,
     UpdateRequest,
 };
@@ -311,12 +311,27 @@ pub fn send_signal(
             // sees the same text: "process with pid N not found" / "... tag X ...".
             not_found(pid, tag.as_deref())
         })?;
-    let signo = parse_signal(req.signal.as_ref()).ok_or_else(|| {
-        ConnectError::new(
-            ConnectCode::InvalidArgument,
-            format!("unsupported signal: {:?}", req.signal),
-        )
-    })?;
+    // Three outcomes, matching upstream: a malformed JSON value is a decode
+    // error (`invalid_argument`); the zero value — an absent field, `null`, the
+    // explicit `SIGNAL_UNSPECIFIED`, or any unknown *name* — is rejected with
+    // the enum's own name; any other number is rejected with that number. A
+    // Rust debug repr never reaches the wire.
+    let signo = match decode_signal(req.signal.as_ref()) {
+        Err(message) => return Err(ConnectError::new(ConnectCode::InvalidArgument, message)),
+        Ok(0) => {
+            return Err(ConnectError::new(
+                ConnectCode::Unimplemented,
+                "invalid signal: SIGNAL_UNSPECIFIED",
+            ))
+        }
+        Ok(signo) if signo == libc::SIGKILL || signo == libc::SIGTERM => signo,
+        Ok(other) => {
+            return Err(ConnectError::new(
+                ConnectCode::Unimplemented,
+                format!("invalid signal: {other}"),
+            ))
+        }
+    };
     // The table can still hold a pid whose process exited but was not yet
     // reaped; kill(-pid) then fails with ESRCH. Report that as not_found
     // (the process is gone from the caller's perspective, matching Go),
@@ -726,6 +741,55 @@ mod tests {
                 .unwrap();
         let err = send_signal(&table, &req).unwrap_err();
         assert_eq!(err.code, ConnectCode::NotFound);
+    }
+
+    /// An unknown enum name decodes to the proto3 zero value upstream and the
+    /// service answers `unimplemented`; ours must not answer a different code
+    /// or leak a Rust debug repr of the value.
+    #[test]
+    fn send_signal_invalid_name_is_unimplemented() {
+        let table = ProcessTable::new(Arc::new(crate::process::cgroup::NoopManager));
+        // The signal is parsed only after the process is found, so the entry has
+        // to exist for this shape to be reachable at all.
+        let (sender, _rx) = crate::process::OutputBus::new().expect("a fresh bus");
+        table.insert_process(ProcEntry {
+            pid: 7,
+            tag: None,
+            config: crate::process::wire::ProcessConfig::default(),
+            sender,
+            pty_master: None,
+            input: disabled_input(),
+            cgroup: None,
+            termination: Arc::new(std::sync::Mutex::new(None)),
+            terminal: Arc::new(std::sync::Mutex::new(None)),
+        });
+        let req: SendSignalRequest =
+            serde_json::from_str(r#"{"process":{"pid":7},"signal":"SIGNAL_NOT_A_SIGNAL"}"#)
+                .unwrap();
+        let err = send_signal(&table, &req).unwrap_err();
+        assert_eq!(err.code, ConnectCode::Unimplemented);
+        assert_eq!(err.message, "invalid signal: SIGNAL_UNSPECIFIED");
+
+        // A malformed JSON value is a *decode* error upstream, not an unknown
+        // enum: the status must stay 400 for these.
+        for bad in ["true", "{}", "[]", "1.5", "2147483648"] {
+            let raw = format!(r#"{{"process":{{"pid":7}},"signal":{bad}}}"#);
+            let req: SendSignalRequest = serde_json::from_str(&raw).unwrap();
+            let err = send_signal(&table, &req).unwrap_err();
+            assert_eq!(err.code, ConnectCode::InvalidArgument, "{bad}");
+            assert!(
+                err.message.starts_with("unmarshal message:"),
+                "{bad}: {}",
+                err.message
+            );
+        }
+
+        // An unknown *number* keeps its value and is named in the message.
+        let req: SendSignalRequest =
+            serde_json::from_str(r#"{"process":{"pid":7},"signal":99}"#).unwrap();
+        let err = send_signal(&table, &req).unwrap_err();
+        assert_eq!(err.code, ConnectCode::Unimplemented);
+        assert_eq!(err.message, "invalid signal: 99");
     }
 
     #[test]

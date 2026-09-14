@@ -49,7 +49,7 @@ cube-envd/                            the component directory; everything below 
 │   │   ├── http/                     content_disposition, encoding, httpdate, preconditions, ranges
 │   │   ├── watch/                    inotify.rs, pump.rs, tree.rs
 │   │   ├── data_plane_tests.rs       data-plane tests
-│   │   ├── download.rs
+│   │   ├── download/                 mod.rs (ServeContent stages, Range/conditionals), body.rs (pipeline: pool, budgets, shapes), tests.rs
 │   │   ├── entry.rs                  disk metadata -> EntryInfo
 │   │   ├── errors.rs                 error -> gRPC status mapping
 │   │   ├── mod.rs                    stat / listDir / makeDir / move / remove
@@ -93,6 +93,13 @@ purpose are summarised in the annotation rather than expanded. Not listed: `targ
 (cargo's build directory, ignored by `cube-envd/.gitignore`), `.gitignore`
 itself, and this README.
 
+A file is split when its **non-test** code passes 800 lines *and* it holds two
+responsibility areas that share no state. Both conditions matter: `command.rs` is
+1,644 lines but 1,084 of them are tests, and `handlers.rs` is 521 lines of one
+responsibility. `download.rs` (945 non-test lines: the ServeContent stage machine
+plus the body pipeline, which owns its own pool and budgets) met both and is now
+`download.rs` + `download/body.rs` + `download/tests.rs`.
+
 `filesystem/` and `process/` never reference each other, and nothing below
 `app/` reaches back into it. That is enforced rather than merely intended:
 `tests/layer_rule.rs` reads `src/` and fails the suite on a forbidden module
@@ -120,7 +127,7 @@ Implemented (behavior matched fixture-by-fixture against the baseline):
 | REST | `GET /health` (204), `POST /init` (envVars merge + optional accessToken), `GET /envs`, `GET /metrics`, `GET/POST /files` (octet-stream + multipart, relative paths, ownership, error vocabulary) |
 | `process.Process` | `Start` (Connect JSON streaming: start/data/end events; optional pipe stdin defaults on; `pty` allocates a real pty with merged `data.pty` output, CRLF line discipline and initial window size; `cwd` validation and privilege drop; whole-group deadline cleanup; a client disconnect leaves the child running), `Connect` (attach by pid/tag from the current output head), `List`, `SendSignal`, `SendInput`, `StreamInput`, `CloseStdin` and `Update` |
 | `filesystem.Filesystem` | `Stat`, `ListDir` (depth-limited; lexical, depth-first `filepath.WalkDir` order), `MakeDir` (ownership on every created component), `Move`, `Remove` (idempotent), `WatchDir` (Connect server streaming: `start`/`keepalive`/`filesystem` events; fsnotify-faithful op mapping with the fixed expansion order; per-directory inotify watches with optional full recursion incl. synthetic creates for pre-existing subtrees and cookie-paired rename path rewrites), `CreateWatcher` / `GetWatcherEvents` / `RemoveWatcher` (pull watchers with id lifecycle) |
-| CLI | Go `flag` compatible: `-port` (u16, `-port N` or `-port=N`), `-isnotfc` (accepted and ignored; `-isnotfc=false` is **rejected** — only the non-FC mode is implemented), `-version`/`--version`, `-commit`, `-h`/`-help` (usage, exit 0); `-cmd`/`-cgroup-root` are recognized but not implemented yet (warned and skipped); **any other flag or positional argument is a usage error — Go's message + usage on stderr + exit 2** |
+| CLI | Go `flag` compatible: `-port` (u16, `-port N` or `-port=N`), `-isnotfc` (accepted and ignored; `-isnotfc=false` is **rejected** — only the non-FC mode is implemented), `-version`/`--version`, `-commit`, `-h`/`-help` (usage, exit 0); `-cgroup-memory-max-bytes` (cube-envd extension — upstream has no equivalent — and the flag form of `CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES`, which it wins over: the cgroup v2 `user`/`ptys` memory cap in bytes, with a zero or malformed value rejected as a usage error); `-cmd`/`-cgroup-root` are recognized but not implemented yet (warned and skipped); **any other flag or positional argument is a usage error — Go's message + usage on stderr + exit 2** |
 | Auth | `Authorization: Basic base64("<user>:")` / `username` query, `/etc/passwd` resolution, default user `root`, privilege drop per operation, `X-Access-Token` enforced only after /init provides one |
 
 Out of scope — these return stable, protocol-correct `unimplemented`
@@ -309,13 +316,41 @@ There is no direct fallback into the type parent: these parents distribute
 memory/cpu to child leaves and cannot also accept internal processes under
 cgroup v2's no-internal-process constraint. There is no PID-0 migration probe.
 
-Configuration:
+Configuration. Every variable below is read from envd's own environment; the
+two deployment knobs also exist as flags (`-blocking-threads`,
+`-download-max-bodies`) so `ENVD_EXTRA_ARGS` can carry them, and a flag wins
+over the variable (`tests/e2e/envd_conformance/entrypoint_knobs_e2e.py` runs the
+entrypoint and asserts exactly that). See the "Tuning envd" section of
+`docs/guide/tutorials/bring-your-own-image.md` for the user-facing version.
 
+- `CUBE_ENVD_BLOCKING_THREADS`: blocking-pool thread cap, default `64`,
+  clamped to `4..=256` (an invalid value warns and keeps the default rather
+  than failing startup). The pool serves process reaping, upload writers,
+  filesystem RPCs and the `/files` body pipeline; `platform/limits.rs` derives
+  that pipeline's budgets from it: at most `pool / 2` bodies may buffer ahead
+  (1 MiB slices with read-ahead), of which at most `pool / 4` may also hold a
+  pool thread, and a body that gets neither streams 256 KiB slices without
+  read-ahead, so a storm of stalled downloads cannot grow the daemon's memory
+  with the connection count. Lowering the cap lowers all of them. Raise it on
+  guests with a larger memory budget (~13 KiB touched RSS per thread), lower it
+  under memory pressure.
+- `CUBE_ENVD_DOWNLOAD_MAX_BODIES`: global cap on concurrent *large* `/files`
+  downloads (a body that fits in one chunk is exempt), default twice the pool
+  size (`128` at the default pool), never below what the pipeline itself needs
+  (all blocking producers plus all buffered bodies, `48` at the default) and
+  never above `1024`. A request over the cap is refused with `503` instead of
+  being queued, because a stalled client holding a slot must not put later
+  downloads behind it. Lower it to bound the daemon's memory harder. The Go
+  baseline has no such cap, so a client that opens more concurrent large
+  downloads than this sees `503` where Go would keep going.
 - `CUBE_ENVD_CGROUP_ROOT`: cgroup v2 root, default `/sys/fs/cgroup`; nested
   daemon membership is resolved when visible below that root.
 - `CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES`: positive requested memory cap, clamped
   by the safe guest/enclosing-parent limit. Without it, the budget reserves
-  `min(total/8, 128 MiB)` from the effective guest/parent memory ceiling.
+  `min(total/8, 128 MiB)` from the effective guest/parent memory ceiling. The
+  cube-envd `-cgroup-memory-max-bytes` flag sets the same thing and wins over
+  it, so the cap can be injected on the command line (see `ENVD_EXTRA_ARGS` in
+  the bring-your-own-image tutorial) instead of envd's own environment.
 
 A Start timeout kills the command, publishes the real EndEvent, then emits a
 `deadline_exceeded` trailer. `Connect-Timeout-Ms` bounds the attachment, not
